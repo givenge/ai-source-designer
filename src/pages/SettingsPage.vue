@@ -15,19 +15,38 @@ onMounted(async () => {
 <template>
   <section class="page">
     <header class="page-hero">
-      <p class="eyebrow">
-        Settings Contract
-      </p>
-      <h2>AI Provider 与安全存储</h2>
-      <p>
-        所有配置统一写入 `~/.aisourcedesign/settings.json`，日志与产物也在同一目录下。
-      </p>
+      <div class="hero-topline">
+        <div class="hero-copy">
+          <p class="eyebrow">
+            Settings Contract
+          </p>
+          <h2>AI Provider 与安全存储</h2>
+          <p class="hero-lead">
+            所有配置统一写入 `~/.aisourcedesign/settings.json`，任务页只负责执行与导出。
+          </p>
+        </div>
+
+        <div class="hero-actions">
+          <RouterLink
+            to="/tasks"
+            class="secondary-button"
+          >
+            任务台
+          </RouterLink>
+          <RouterLink
+            to="/settings"
+            class="secondary-button is-active"
+          >
+            设置
+          </RouterLink>
+        </div>
+      </div>
     </header>
 
     <section class="panel form-panel">
       <header class="panel-header">
         <h3>模型接入</h3>
-        <p>首版固定为 OpenAI-compatible 接口，默认提供 `mock://fixture` 回退。</p>
+        <p>当前默认走 OpenAI-compatible 接口，也可以继续使用 `mock://fixture` 进行本地演示。</p>
       </header>
 
       <label class="field">

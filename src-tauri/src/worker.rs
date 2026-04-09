@@ -1,11 +1,15 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::SamplingResult;
-use crate::state::AppPaths;
+use crate::state::AppState;
+
+const WORKER_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,7 +37,7 @@ struct WorkerResponse {
 }
 
 pub fn sample_site(
-    paths: &AppPaths,
+    state: &AppState,
     task_id: &str,
     target_url: &str,
     test_keyword: Option<&str>,
@@ -44,14 +48,14 @@ pub fn sample_site(
         params: WorkerParams {
             target_url,
             test_keyword,
-            output_dir: paths.task_dir(task_id).to_string_lossy().to_string(),
-            fixtures_dir: paths.fixtures_dir.to_string_lossy().to_string(),
+            output_dir: state.paths.task_dir(task_id).to_string_lossy().to_string(),
+            fixtures_dir: state.paths.fixtures_dir.to_string_lossy().to_string(),
         },
     };
 
     let payload = serde_json::to_vec(&request)?;
     let mut child = Command::new("node")
-        .arg(&paths.worker_script)
+        .arg(&state.paths.worker_script)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -59,7 +63,7 @@ pub fn sample_site(
         .with_context(|| {
             format!(
                 "failed to start worker with script {}",
-                paths.worker_script.display()
+                state.paths.worker_script.display()
             )
         })?;
 
@@ -69,6 +73,34 @@ pub fn sample_site(
         .ok_or_else(|| anyhow!("failed to open worker stdin"))?;
     stdin.write_all(&payload)?;
     drop(stdin);
+
+    let started_at = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+
+        if state.runtime.is_cancel_requested(task_id) {
+            let _ = child.kill();
+            let _ = child.wait_with_output();
+            return Err(anyhow!("task cancelled by user"));
+        }
+
+        if started_at.elapsed() >= WORKER_TIMEOUT {
+            let _ = child.kill();
+            let output = child.wait_with_output()?;
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(anyhow!(
+                "worker timed out after {}s; stderr: {}; stdout: {}",
+                WORKER_TIMEOUT.as_secs(),
+                stderr.trim(),
+                stdout.trim()
+            ));
+        }
+
+        thread::sleep(Duration::from_millis(200));
+    }
 
     let output = child.wait_with_output()?;
     if !output.status.success() {

@@ -4,6 +4,7 @@ import {
   isTauri,
   type InvokeArgs,
 } from '@tauri-apps/api/core';
+import { save } from '@tauri-apps/plugin-dialog';
 import type {
   AiSettings,
   ArtifactBundle,
@@ -47,6 +48,10 @@ export async function createTask(draft: TaskDraft): Promise<TaskRecord> {
   return invokeOrThrow<TaskRecord>('create_task', { draft });
 }
 
+export async function deleteTask(taskId: string): Promise<void> {
+  return invokeOrThrow<void>('delete_task', { taskId });
+}
+
 export async function getTask(taskId: string): Promise<TaskRecord> {
   return invokeOrThrow<TaskRecord>('get_task', { taskId });
 }
@@ -63,8 +68,29 @@ export async function getTaskArtifacts(taskId: string): Promise<ArtifactBundle> 
   return invokeOrThrow<ArtifactBundle>('get_task_artifacts', { taskId });
 }
 
-export async function exportTaskSource(taskId: string): Promise<string> {
-  return invokeOrThrow<string>('export_task_source', { taskId });
+export async function exportTaskSource(
+  taskId: string,
+  outputPath?: string | null,
+): Promise<string> {
+  return invokeOrThrow<string>('export_task_source', { taskId, outputPath: outputPath ?? null });
+}
+
+export async function pickJsonSavePath(defaultPath: string): Promise<string | null> {
+  if (!isTauriRuntime()) {
+    throw new Error('请通过 `pnpm tauri dev` 启动桌面应用。');
+  }
+
+  const selected = await save({
+    defaultPath,
+    filters: [
+      {
+        name: 'JSON',
+        extensions: ['json'],
+      },
+    ],
+  });
+
+  return typeof selected === 'string' ? selected : null;
 }
 
 export function toAssetUrl(path: string): string {

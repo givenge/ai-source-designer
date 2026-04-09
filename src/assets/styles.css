@@ -94,9 +94,10 @@ input {
 .page-hero h2 {
   margin: 0;
   font-family: var(--display-font);
-  font-size: clamp(2.8rem, 7vw, 5rem);
-  line-height: 0.95;
+  font-size: clamp(1.9rem, 4vw, 3.05rem);
+  line-height: 1;
   font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .hero-lead,
@@ -110,7 +111,7 @@ input {
 .shell-main {
   max-width: 1480px;
   margin: 0 auto;
-  padding: 5.5rem 1.4rem 2.4rem;
+  padding: 2.2rem 1.4rem 2.4rem;
 }
 
 .page {
@@ -126,6 +127,10 @@ input {
     linear-gradient(145deg, rgba(255, 255, 255, 0.74), rgba(255, 255, 255, 0.18)),
     rgba(247, 241, 228, 0.82);
   box-shadow: var(--panel-shadow);
+}
+
+.detail-hero {
+  padding-block: 1.45rem 1.6rem;
 }
 
 .home-hero {
@@ -149,6 +154,32 @@ input {
   flex-wrap: wrap;
   gap: 0.6rem;
   margin-top: 1.3rem;
+}
+
+.hero-topline {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1.25rem;
+}
+
+.hero-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.hero-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+}
+
+.detail-title {
+  font-size: clamp(1.5rem, 2.8vw, 2.35rem);
+  line-height: 1.08;
 }
 
 .hero-notes span {
@@ -192,12 +223,19 @@ input {
   border-radius: 28px;
   background: rgba(255, 255, 255, 0.58);
   box-shadow: var(--panel-shadow);
+  min-width: 0;
 }
 
 .panel-header {
   display: grid;
   gap: 0.35rem;
   margin-bottom: 1rem;
+}
+
+.panel-header--row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 1rem;
 }
 
 .panel-header h3,
@@ -253,6 +291,38 @@ input {
 .primary-button:disabled {
   opacity: 0.58;
   cursor: progress;
+}
+
+.secondary-button,
+.back-button {
+  width: fit-content;
+  padding: 0.82rem 1.2rem;
+  border: 1px solid rgba(27, 32, 40, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--ink);
+  cursor: pointer;
+  transition:
+    transform 160ms ease,
+    background 160ms ease,
+    border-color 160ms ease;
+}
+
+.secondary-button:hover:not(:disabled),
+.back-button:hover {
+  transform: translateY(-1px);
+  background: rgba(255, 255, 255, 0.94);
+  border-color: rgba(27, 32, 40, 0.2);
+}
+
+.secondary-button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.secondary-button.is-active {
+  background: rgba(168, 90, 31, 0.12);
+  border-color: rgba(168, 90, 31, 0.22);
 }
 
 .settings-meta,
@@ -312,24 +382,54 @@ input {
   border: 1px solid var(--line);
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.34);
+  min-width: 0;
 }
 
-.back-button {
+.task-row__main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.task-row__copy,
+.task-row__copy strong,
+.task-row__copy p {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.task-row__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+  flex: 0 0 auto;
+}
+
+.danger-button {
   width: fit-content;
-  padding: 0.7rem 0.95rem;
-  border: 1px solid rgba(27, 32, 40, 0.12);
+  padding: 0.82rem 1.2rem;
+  border: 1px solid rgba(157, 56, 41, 0.18);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.72);
-  color: var(--ink);
+  background: rgba(157, 56, 41, 0.08);
+  color: var(--danger);
   cursor: pointer;
   transition:
     transform 160ms ease,
-    background 160ms ease;
+    background 160ms ease,
+    border-color 160ms ease,
+    opacity 160ms ease;
 }
 
-.back-button:hover {
+.danger-button:hover:not(:disabled) {
   transform: translateY(-1px);
-  background: rgba(255, 255, 255, 0.88);
+  background: rgba(157, 56, 41, 0.12);
+  border-color: rgba(157, 56, 41, 0.28);
+}
+
+.danger-button:disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
 }
 
 .task-row p,
@@ -342,7 +442,7 @@ input {
 .phase-grid {
   display: grid;
   gap: 1rem;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
 .phase-card {
@@ -350,6 +450,8 @@ input {
   border-radius: 20px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.4);
+  min-width: 0;
+  overflow: hidden;
 }
 
 .phase-card[data-passed='true'] {
@@ -360,14 +462,29 @@ input {
   border-color: rgba(163, 61, 46, 0.3);
 }
 
+.phase-card__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.6rem;
+}
+
+.phase-card__head strong {
+  white-space: nowrap;
+}
+
 .code-block {
   overflow: auto;
+  max-width: 100%;
   padding: 1rem;
   border-radius: 18px;
   background: #1f2630;
   color: #f6f1e7;
   font-size: 0.88rem;
   line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .code-block.compact {
@@ -410,6 +527,59 @@ input {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.artifact-columns > div {
+  min-width: 0;
+}
+
+.export-panel {
+  display: grid;
+  gap: 1rem;
+}
+
+.export-panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.75rem;
+}
+
+.export-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+  color: var(--ink-soft);
+  font-size: 0.92rem;
+  overflow-wrap: anywhere;
+}
+
+.status-hint {
+  margin-top: -0.2rem;
+  margin-bottom: 1rem;
+}
+
+.detail-list li,
+.log-list article p,
+.log-list article strong,
+.log-list article span,
+.panel-header p,
+.hero-lead {
+  overflow-wrap: anywhere;
+}
+
+.log-list article {
+  padding: 0.95rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.34);
+}
+
 @media (max-width: 1080px) {
   .dashboard-grid,
   .panel-grid,
@@ -418,8 +588,28 @@ input {
     grid-template-columns: 1fr;
   }
 
+  .hero-topline,
+  .export-panel__header,
+  .panel-header--row {
+    grid-template-columns: 1fr;
+    display: grid;
+  }
+
+  .hero-actions,
+  .toolbar-actions {
+    justify-content: flex-start;
+  }
+
+  .task-row {
+    align-items: flex-start;
+  }
+
+  .task-row__actions {
+    justify-content: flex-start;
+  }
+
   .shell-main {
-    padding: 5.25rem 1rem 1rem;
+    padding: 1.25rem 1rem 1rem;
   }
 
   .quick-nav {

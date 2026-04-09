@@ -3,6 +3,7 @@ import { onMounted, reactive } from 'vue';
 import { useRouter } from 'vue-router';
 import { formatDate } from '@/lib/format';
 import StatusBadge from '@/components/StatusBadge.vue';
+import type { TaskStatus } from '@/types/models';
 import { useSettingsStore } from '@/stores/settings';
 import { useTasksStore } from '@/stores/tasks';
 
@@ -30,18 +31,50 @@ async function launchTask() {
   await router.push(`/tasks/${result.id}`);
   void tasksStore.start(result.id);
 }
+
+function isActiveStatus(status: TaskStatus): boolean {
+  return ['sampling', 'synthesizing', 'validating', 'repairing'].includes(status);
+}
+
+async function deleteTaskRecord(taskId: string) {
+  if (!window.confirm('确定删除这个任务以及对应证据吗？')) {
+    return;
+  }
+
+  await tasksStore.delete(taskId);
+}
 </script>
 
 <template>
   <section class="page page-home">
     <header class="page-hero home-hero">
-      <p class="eyebrow">
-        Reader-Rust Compatible
-      </p>
-      <h2>AI Source Designer</h2>
-      <p class="hero-lead">
-        采样真实页面，收集证据，再把模型输出压回可验证、可导出的书源 JSON。
-      </p>
+      <div class="hero-topline">
+        <div class="hero-copy">
+          <p class="eyebrow">
+            Reader-Rust Compatible
+          </p>
+          <h2>AI Source Designer</h2>
+          <p class="hero-lead">
+            采样真实页面，收集证据，再把模型输出压回可验证、可导出的书源 JSON。
+          </p>
+        </div>
+
+        <div class="hero-actions">
+          <RouterLink
+            to="/tasks"
+            class="secondary-button is-active"
+          >
+            任务台
+          </RouterLink>
+          <RouterLink
+            to="/settings"
+            class="secondary-button"
+          >
+            设置
+          </RouterLink>
+        </div>
+      </div>
+
       <div class="hero-notes">
         <span>桌面本地运行</span>
         <span>Playwright 内置采样</span>
@@ -103,18 +136,32 @@ async function launchTask() {
           v-if="tasksStore.records.length"
           class="task-list"
         >
-          <RouterLink
+          <article
             v-for="task in tasksStore.records"
             :key="task.id"
-            :to="`/tasks/${task.id}`"
             class="task-row"
           >
-            <div>
-              <strong>{{ task.targetUrl }}</strong>
-              <p>{{ formatDate(task.updatedAt) }}</p>
+            <RouterLink
+              :to="`/tasks/${task.id}`"
+              class="task-row__main"
+            >
+              <div class="task-row__copy">
+                <strong>{{ task.targetUrl }}</strong>
+                <p>{{ formatDate(task.updatedAt) }}</p>
+              </div>
+            </RouterLink>
+
+            <div class="task-row__actions">
+              <StatusBadge :status="task.status" />
+              <button
+                class="danger-button"
+                :disabled="tasksStore.deleting"
+                @click.stop="deleteTaskRecord(task.id)"
+              >
+                {{ tasksStore.deleting ? '删除中...' : '删除' }}
+              </button>
             </div>
-            <StatusBadge :status="task.status" />
-          </RouterLink>
+          </article>
         </div>
 
         <p

@@ -1,5 +1,7 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use tauri::{AppHandle, Manager, Runtime};
@@ -21,10 +23,12 @@ impl AppPaths {
         let data_dir = home_dir.join(".aisourcedesign");
         let tasks_dir = data_dir.join("tasks");
         let logs_dir = data_dir.join("logs");
-        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .canonicalize()
-            .context("failed to resolve repository root")?;
+        let repo_root = normalize_runtime_path(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .canonicalize()
+                .context("failed to resolve repository root")?,
+        );
 
         let paths = Self {
             db_path: data_dir.join("app.sqlite"),
@@ -67,7 +71,74 @@ impl AppPaths {
     }
 }
 
+fn normalize_runtime_path(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let raw = path.to_string_lossy();
+        if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+            return PathBuf::from(stripped);
+        }
+    }
+
+    path
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub paths: AppPaths,
+    pub runtime: Arc<TaskRuntime>,
+}
+
+#[derive(Debug, Default)]
+pub struct TaskRuntime {
+    running: Mutex<HashSet<String>>,
+    cancel_requested: Mutex<HashSet<String>>,
+}
+
+impl TaskRuntime {
+    pub fn register(&self, task_id: &str) -> bool {
+        let mut running = self.running.lock().expect("task runtime poisoned");
+        if running.contains(task_id) {
+            return false;
+        }
+
+        self.cancel_requested
+            .lock()
+            .expect("task runtime poisoned")
+            .remove(task_id);
+        running.insert(task_id.to_string());
+        true
+    }
+
+    pub fn unregister(&self, task_id: &str) {
+        self.running
+            .lock()
+            .expect("task runtime poisoned")
+            .remove(task_id);
+        self.cancel_requested
+            .lock()
+            .expect("task runtime poisoned")
+            .remove(task_id);
+    }
+
+    pub fn request_cancel(&self, task_id: &str) {
+        self.cancel_requested
+            .lock()
+            .expect("task runtime poisoned")
+            .insert(task_id.to_string());
+    }
+
+    pub fn is_cancel_requested(&self, task_id: &str) -> bool {
+        self.cancel_requested
+            .lock()
+            .expect("task runtime poisoned")
+            .contains(task_id)
+    }
+
+    pub fn is_running(&self, task_id: &str) -> bool {
+        self.running
+            .lock()
+            .expect("task runtime poisoned")
+            .contains(task_id)
+    }
 }

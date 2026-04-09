@@ -109,6 +109,12 @@ async function findFirstHref(page, selectors) {
   }, selectors);
 }
 
+async function hasAnySelector(page, selectors) {
+  return page.evaluate((selectorList) => {
+    return selectorList.some((selector) => Boolean(document.querySelector(selector)));
+  }, selectors);
+}
+
 async function openSearchPage(page, testKeyword) {
   if (!testKeyword) {
     return false;
@@ -132,6 +138,116 @@ async function openSearchPage(page, testKeyword) {
 
   await page.goto(searchUrl.toString(), { waitUntil: 'domcontentloaded' });
   return true;
+}
+
+async function safeGoto(page, url) {
+  if (!url) {
+    return false;
+  }
+
+  try {
+    await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: 12000,
+    });
+    return true;
+  } catch (error) {
+    await page.waitForTimeout(500);
+    if (page.url() !== 'about:blank') {
+      return true;
+    }
+
+    throw error;
+  }
+}
+
+async function findBestSearchResultHref(page, testKeyword) {
+  return page.evaluate(({ keyword }) => {
+    const normalize = (value) =>
+      String(value || '')
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}]+/gu, '');
+
+    const needle = normalize(keyword);
+    const containerSelectors = [
+      '.librarylist li',
+      '.result-list .result-item',
+      '.novellist .item',
+      '.search-result li',
+      '.book-list li',
+      '.bookbox',
+    ];
+    const linkSelectors = [
+      '.bookname a[href]',
+      '.bookinfo .bookname a[href]',
+      '.novelname[href]',
+      '.result-title a[href]',
+      '.book-title a[href]',
+      'h3 a[href]',
+      'a[href]',
+    ];
+
+    const scoredResults = [];
+    for (const containerSelector of containerSelectors) {
+      const containers = [...document.querySelectorAll(containerSelector)];
+      if (!containers.length) {
+        continue;
+      }
+
+      for (const container of containers) {
+        let link = null;
+        for (const linkSelector of linkSelectors) {
+          link = container.querySelector(linkSelector);
+          if (link) {
+            break;
+          }
+        }
+
+        if (!link) {
+          continue;
+        }
+
+        const href = link.getAttribute('href') || '';
+        const title = (link.textContent || '').trim();
+        if (!href || !title) {
+          continue;
+        }
+
+        const normalizedTitle = normalize(title);
+        let score = 1;
+        if (needle) {
+          if (normalizedTitle === needle) {
+            score = 1000;
+          } else if (normalizedTitle.startsWith(needle)) {
+            score = 800;
+          } else if (normalizedTitle.includes(needle)) {
+            score = 600;
+          } else {
+            score = 0;
+          }
+        }
+
+        scoredResults.push({
+          href: new URL(href, window.location.href).toString(),
+          score,
+          titleLength: normalizedTitle.length || title.length,
+        });
+      }
+
+      if (scoredResults.length) {
+        break;
+      }
+    }
+
+    scoredResults.sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+      return left.titleLength - right.titleLength;
+    });
+
+    return scoredResults[0]?.href || null;
+  }, { keyword: testKeyword || '' });
 }
 
 async function sampleFixture({ fixtureName, fixturesDir, outputDir }) {
@@ -211,10 +327,13 @@ async function sampleFixture({ fixtureName, fixturesDir, outputDir }) {
 }
 
 async function sampleLiveSite({ targetUrl, outputDir, testKeyword }) {
+  let browser;
   try {
     const playwright = await import('playwright');
-    const browser = await playwright.chromium.launch();
+    browser = await playwright.chromium.launch();
     const page = await browser.newPage();
+    page.setDefaultNavigationTimeout(12000);
+    page.setDefaultTimeout(12000);
     const networkSamples = [];
     const artifactManifest = {
       screenshots: [],
@@ -272,7 +391,7 @@ async function sampleLiveSite({ targetUrl, outputDir, testKeyword }) {
       }
     });
 
-    await page.goto(targetUrl, { waitUntil: 'domcontentloaded' });
+    await safeGoto(page, targetUrl);
 
     await capturePage({
       page,
@@ -291,15 +410,20 @@ async function sampleLiveSite({ targetUrl, outputDir, testKeyword }) {
         pageResults,
       });
 
-      const bookUrl = await findFirstHref(page, [
+      const bookUrl = (await findBestSearchResultHref(page, testKeyword)) || await findFirstHref(page, [
+        '.bookbox .bookname a[href]',
+        '.bookinfo .bookname a[href]',
+        '.librarylist .novelname[href]',
         '.book-title a[href]',
+        '.novelname[href]',
         '.novellist .item a[href*="/book/"]',
+        'a[href^="/biqu"]',
         'a[href*="/book/"]',
         '.result-list a[href]',
       ]);
 
       if (bookUrl) {
-        await page.goto(bookUrl, { waitUntil: 'domcontentloaded' });
+        await safeGoto(page, bookUrl);
         await capturePage({
           page,
           outputDir,
@@ -308,20 +432,58 @@ async function sampleLiveSite({ targetUrl, outputDir, testKeyword }) {
           pageResults,
         });
 
+        const inlineTocSelectors = [
+          '#chapterlist p',
+          '.recommend #chapterlist p',
+          '.directoryArea p',
+          '.fulldir .dirlist li',
+          '.dirlist li',
+          '.chapter-list li',
+          '.listmain dd',
+          '#list dd',
+          '.booklist li',
+        ];
+
+        const hasInlineToc = await hasAnySelector(page, inlineTocSelectors);
+        if (hasInlineToc) {
+          await capturePage({
+            page,
+            outputDir,
+            role: 'toc',
+            artifactManifest,
+            pageResults,
+          });
+        }
+
         let tocUrl = await findFirstHref(page, [
+          '#chapterlist a[href]',
+          '.recommend #chapterlist a[href]',
+          '.directoryArea a[href]',
+          '.fulldir .dirlist a[href]',
+          '.dirlist a[href]',
           '.toc-link[href]',
           'a[href*="list"]',
           'a[href*="catalog"]',
         ]);
 
+        if (hasInlineToc) {
+          tocUrl = null;
+        }
+
         if (!tocUrl) {
           const chapterUrl = await findFirstHref(page, [
+          '#chapterlist a[href]',
+          '.recommend #chapterlist a[href]',
+          '.directoryArea a[href]',
+            '.btn a[href]',
+            '.fulldir .dirlist a[href]',
+            '.dirlist a[href]',
             '.chapter-list a[href]',
             '.listmain a[href]',
             '#list a[href]',
             '.booklist a[href]',
           ]);
-          if (chapterUrl) {
+          if (chapterUrl && !hasInlineToc) {
             await capturePage({
               page,
               outputDir,
@@ -334,7 +496,7 @@ async function sampleLiveSite({ targetUrl, outputDir, testKeyword }) {
         }
 
         if (tocUrl && tocUrl !== page.url()) {
-          await page.goto(tocUrl, { waitUntil: 'domcontentloaded' });
+          await safeGoto(page, tocUrl);
           await capturePage({
             page,
             outputDir,
@@ -345,6 +507,12 @@ async function sampleLiveSite({ targetUrl, outputDir, testKeyword }) {
         }
 
         const chapterUrl = await findFirstHref(page, [
+          '#chapterlist a[href]',
+          '.recommend #chapterlist a[href]',
+          '.directoryArea a[href]',
+          '.btn a[href]',
+          '.fulldir .dirlist a[href]',
+          '.dirlist a[href]',
           '.chapter-list a[href]',
           '.listmain a[href]',
           '#list a[href]',
@@ -353,7 +521,7 @@ async function sampleLiveSite({ targetUrl, outputDir, testKeyword }) {
         ]);
 
         if (chapterUrl) {
-          await page.goto(chapterUrl, { waitUntil: 'domcontentloaded' });
+          await safeGoto(page, chapterUrl);
           await capturePage({
             page,
             outputDir,
@@ -365,7 +533,6 @@ async function sampleLiveSite({ targetUrl, outputDir, testKeyword }) {
       }
     }
 
-    await browser.close();
     return {
       fixtureName: null,
       siteLabel: new URL(targetUrl).hostname,
@@ -378,6 +545,10 @@ async function sampleLiveSite({ targetUrl, outputDir, testKeyword }) {
     throw new Error(
       `实时 Playwright 采样未就绪：${error instanceof Error ? error.message : String(error)}`,
     );
+  } finally {
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
   }
 }
 

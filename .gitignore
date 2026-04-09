@@ -8,3 +8,5 @@ src-tauri/.cargo
 artifacts/*
 !artifacts/.gitkeep
 .env
+.cargo-home
+target-tauri-cli

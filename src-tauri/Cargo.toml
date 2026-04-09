@@ -32,3 +32,4 @@ tauri = { version = "2.8.5", features = [] }
 tauri-plugin-log = "2"
 url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
+tauri-plugin-dialog = "2"
