@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720">
+  <rect width="1200" height="720" fill="#f6efe3" />
+  <text x="120" y="140" fill="#1f2630" font-size="56" font-family="Georgia, serif">章节目录</text>
+  <line x1="120" y1="180" x2="1080" y2="180" stroke="#d3c2a7" stroke-width="3" />
+  <text x="140" y="290" fill="#1f2630" font-size="34">第一章 旧港回声</text>
+  <text x="140" y="370" fill="#1f2630" font-size="34">第二章 折叠天穹</text>
+</svg>

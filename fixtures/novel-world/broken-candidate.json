@@ -1,0 +1,34 @@
+{
+  "strategy": "fixture-mock-broken",
+  "confidence": 0.41,
+  "evidenceRefs": [
+    {
+      "label": "错误候选",
+      "artifactPath": "dom/search-book-list.html",
+      "detail": "用于验证失败路径。"
+    }
+  ],
+  "repairHistory": [],
+  "bookSource": {
+    "bookSourceName": "Fixture Novel World Broken",
+    "bookSourceUrl": "https://fixture.novel.world",
+    "enabled": true,
+    "searchUrl": "https://fixture.novel.world/search?q=${key}",
+    "ruleSearch": {
+      "bookList": ".missing-item",
+      "name": ".book-title a@text",
+      "bookUrl": ".book-title a@attr[href]"
+    },
+    "ruleBookInfo": {
+      "name": "h1.title@text"
+    },
+    "ruleToc": {
+      "chapterList": ".chapter-list li",
+      "chapterName": "a@text",
+      "chapterUrl": "a@attr[href]"
+    },
+    "ruleContent": {
+      "content": ".content@textNodes"
+    }
+  }
+}

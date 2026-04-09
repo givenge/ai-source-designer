@@ -1,0 +1,80 @@
+{
+  "name": "novel-world",
+  "baseUrl": "https://fixture.novel.world",
+  "pages": [
+    {
+      "role": "search",
+      "url": "https://fixture.novel.world/search?q=%E6%98%9F%E9%97%A8&page=1",
+      "htmlFile": "pages/search.html",
+      "screenshotFile": "screenshots/search.svg",
+      "snippets": [
+        {
+          "label": "搜索结果列表",
+          "fileName": "search-book-list.html",
+          "contents": "<div class=\"book-item\"><h3 class=\"book-title\"><a href=\"/book/solar-archive\">星门档案</a></h3><p class=\"author\">作者：天工</p><p class=\"intro\">在废弃轨道城中寻找失落星门。</p></div>"
+        }
+      ]
+    },
+    {
+      "role": "book",
+      "url": "https://fixture.novel.world/book/solar-archive",
+      "htmlFile": "pages/book.html",
+      "screenshotFile": "screenshots/book.svg",
+      "snippets": [
+        {
+          "label": "书籍详情头部",
+          "fileName": "book-profile.html",
+          "contents": "<section class=\"book-profile\"><h1 class=\"title\">星门档案</h1><div class=\"meta\"><span class=\"author\">天工</span></div><p class=\"intro\">林述在轨道城废墟中追查星门计划的遗留真相。</p><a class=\"toc-link\" href=\"/book/solar-archive/chapters\">查看目录</a></section>"
+        }
+      ]
+    },
+    {
+      "role": "toc",
+      "url": "https://fixture.novel.world/book/solar-archive/chapters",
+      "htmlFile": "pages/toc.html",
+      "screenshotFile": "screenshots/toc.svg",
+      "snippets": [
+        {
+          "label": "章节列表",
+          "fileName": "toc-list.html",
+          "contents": "<ul class=\"chapter-list\"><li><a href=\"/book/solar-archive/chapter-1\">第一章 旧港回声</a></li><li><a href=\"/book/solar-archive/chapter-2\">第二章 折叠天穹</a></li></ul>"
+        }
+      ]
+    },
+    {
+      "role": "content",
+      "url": "https://fixture.novel.world/book/solar-archive/chapter-1",
+      "htmlFile": "pages/chapter-1.html",
+      "screenshotFile": "screenshots/chapter-1.svg",
+      "snippets": [
+        {
+          "label": "正文首屏",
+          "fileName": "content-first-page.html",
+          "contents": "<div class=\"content\"><p>旧港的潮声像坏掉的钟，在生锈船坞间反复敲击。</p><p>林述踩过积水，看到星门残框在雾里发出微弱的蓝光。</p><p class=\"ad\">Sponsored by AI Source Designer</p></div><a class=\"next-page\" href=\"/book/solar-archive/chapter-1?page=2\">下一页</a>"
+        }
+      ]
+    },
+    {
+      "role": "content-next",
+      "url": "https://fixture.novel.world/book/solar-archive/chapter-1?page=2",
+      "htmlFile": "pages/chapter-1-page-2.html",
+      "screenshotFile": "screenshots/chapter-1-page-2.svg",
+      "snippets": [
+        {
+          "label": "正文第二页",
+          "fileName": "content-second-page.html",
+          "contents": "<div class=\"content\"><p>他将手掌贴上金属裂纹，听见另一侧传来早已断绝的列车轰鸣。</p></div>"
+        }
+      ]
+    }
+  ],
+  "networkSamples": [
+    {
+      "label": "搜索 API",
+      "method": "GET",
+      "url": "https://fixture.novel.world/api/search.json?q=%E6%98%9F%E9%97%A8&page=1",
+      "responseFile": "api/search.json",
+      "notes": "用于证明站点同时提供 JSON API 搜索入口。"
+    }
+  ]
+}

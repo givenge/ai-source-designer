@@ -1,0 +1,51 @@
+{
+  "strategy": "fixture-mock",
+  "confidence": 0.93,
+  "evidenceRefs": [
+    {
+      "label": "搜索结果 DOM",
+      "artifactPath": "dom/search-book-list.html",
+      "detail": "确认 .book-item 和 .book-title a 结构稳定。"
+    },
+    {
+      "label": "详情页 DOM",
+      "artifactPath": "dom/book-profile.html",
+      "detail": "确认标题、作者和 tocUrl 入口。"
+    },
+    {
+      "label": "目录截图",
+      "artifactPath": "screenshots/toc.svg",
+      "detail": "目录页至少包含两条章节。"
+    }
+  ],
+  "repairHistory": [],
+  "bookSource": {
+    "bookSourceName": "Fixture Novel World",
+    "bookSourceUrl": "https://fixture.novel.world",
+    "enabled": true,
+    "searchUrl": "https://fixture.novel.world/search?q=${key}&page=${page}",
+    "ruleSearch": {
+      "bookList": ".book-item",
+      "name": ".book-title a@text",
+      "author": ".author@text",
+      "intro": ".intro@text",
+      "bookUrl": ".book-title a@attr[href]"
+    },
+    "ruleBookInfo": {
+      "name": "h1.title@text",
+      "author": ".meta .author@text",
+      "intro": ".intro@text",
+      "tocUrl": ".toc-link@attr[href]"
+    },
+    "ruleToc": {
+      "chapterList": ".chapter-list li",
+      "chapterName": "a@text",
+      "chapterUrl": "a@attr[href]"
+    },
+    "ruleContent": {
+      "content": ".content@textNodes",
+      "nextContentUrl": ".next-page@attr[href]",
+      "replaceRegex": "Sponsored by AI Source Designer##"
+    }
+  }
+}

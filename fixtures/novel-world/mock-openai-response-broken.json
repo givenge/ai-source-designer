@@ -1,0 +1,14 @@
+{
+  "id": "fixture-response-broken",
+  "object": "chat.completion",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\n  \"strategy\": \"fixture-mock-broken\",\n  \"confidence\": 0.41,\n  \"evidenceRefs\": [\n    {\n      \"label\": \"错误候选\",\n      \"artifactPath\": \"dom/search-book-list.html\",\n      \"detail\": \"用于验证失败路径。\"\n    }\n  ],\n  \"repairHistory\": [],\n  \"bookSource\": {\n    \"bookSourceName\": \"Fixture Novel World Broken\",\n    \"bookSourceUrl\": \"https://fixture.novel.world\",\n    \"enabled\": true,\n    \"searchUrl\": \"https://fixture.novel.world/search?q=${key}\",\n    \"ruleSearch\": {\n      \"bookList\": \".missing-item\",\n      \"name\": \".book-title a@text\",\n      \"bookUrl\": \".book-title a@attr[href]\"\n    },\n    \"ruleBookInfo\": {\n      \"name\": \"h1.title@text\"\n    },\n    \"ruleToc\": {\n      \"chapterList\": \".chapter-list li\",\n      \"chapterName\": \"a@text\",\n      \"chapterUrl\": \"a@attr[href]\"\n    },\n    \"ruleContent\": {\n      \"content\": \".content@textNodes\"\n    }\n  }\n}"
+      },
+      "finish_reason": "stop"
+    }
+  ]
+}

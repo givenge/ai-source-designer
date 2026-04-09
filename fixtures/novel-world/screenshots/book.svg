@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720">
+  <rect width="1200" height="720" fill="#f0e6d3" />
+  <rect x="120" y="120" width="960" height="480" rx="32" fill="#fffdf7" stroke="#cfbea1" />
+  <text x="180" y="250" fill="#1f2630" font-size="60" font-family="Georgia, serif">星门档案</text>
+  <text x="180" y="315" fill="#bc5d2e" font-size="32">作者：天工</text>
+  <text x="180" y="390" fill="#5b6573" font-size="28">林述在轨道城废墟中追查星门计划的遗留真相。</text>
+  <rect x="180" y="450" width="220" height="66" rx="22" fill="#1f2630" />
+  <text x="235" y="493" fill="#f7f2e8" font-size="28">查看目录</text>
+</svg>

@@ -1,0 +1,40 @@
+{
+  "name": "ai-source-designer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 1420",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run && cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:web": "vitest run",
+    "lint": "eslint .",
+    "playwright:install": "playwright install chromium",
+    "smoke:live": "node scripts/live-smoke.mjs",
+    "tauri": "cargo tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "pinia": "^2.3.1",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.20.0",
+    "@tauri-apps/cli": "^2",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "@vue/compiler-sfc": "^3.5.13",
+    "eslint": "^9.20.0",
+    "eslint-plugin-vue": "^9.32.0",
+    "globals": "^15.14.0",
+    "jsdom": "^26.0.0",
+    "playwright": "^1.55.1",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.24.1",
+    "vite": "^6.2.0",
+    "vitest": "^3.0.5",
+    "vue-eslint-parser": "^9.4.3",
+    "vue-tsc": "^2.2.4"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "id": "fixture-response",
+  "object": "chat.completion",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\n  \"strategy\": \"fixture-mock\",\n  \"confidence\": 0.93,\n  \"evidenceRefs\": [\n    {\n      \"label\": \"搜索结果 DOM\",\n      \"artifactPath\": \"dom/search-book-list.html\",\n      \"detail\": \"确认 .book-item 和 .book-title a 结构稳定。\"\n    },\n    {\n      \"label\": \"详情页 DOM\",\n      \"artifactPath\": \"dom/book-profile.html\",\n      \"detail\": \"确认标题、作者和 tocUrl 入口。\"\n    },\n    {\n      \"label\": \"目录截图\",\n      \"artifactPath\": \"screenshots/toc.svg\",\n      \"detail\": \"目录页至少包含两条章节。\"\n    }\n  ],\n  \"repairHistory\": [],\n  \"bookSource\": {\n    \"bookSourceName\": \"Fixture Novel World\",\n    \"bookSourceUrl\": \"https://fixture.novel.world\",\n    \"enabled\": true,\n    \"searchUrl\": \"https://fixture.novel.world/search?q=${key}&page=${page}\",\n    \"ruleSearch\": {\n      \"bookList\": \".book-item\",\n      \"name\": \".book-title a@text\",\n      \"author\": \".author@text\",\n      \"intro\": \".intro@text\",\n      \"bookUrl\": \".book-title a@attr[href]\"\n    },\n    \"ruleBookInfo\": {\n      \"name\": \"h1.title@text\",\n      \"author\": \".meta .author@text\",\n      \"intro\": \".intro@text\",\n      \"tocUrl\": \".toc-link@attr[href]\"\n    },\n    \"ruleToc\": {\n      \"chapterList\": \".chapter-list li\",\n      \"chapterName\": \"a@text\",\n      \"chapterUrl\": \"a@attr[href]\"\n    },\n    \"ruleContent\": {\n      \"content\": \".content@textNodes\",\n      \"nextContentUrl\": \".next-page@attr[href]\",\n      \"replaceRegex\": \"Sponsored by AI Source Designer##\"\n    }\n  }\n}"
+      },
+      "finish_reason": "stop"
+    }
+  ]
+}

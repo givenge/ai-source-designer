@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <rect width="1280" height="720" fill="#f7f2e8"/>
+  <rect x="90" y="84" width="1100" height="552" rx="24" fill="#ffffff" stroke="#d9c8ad"/>
+  <text x="140" y="154" font-size="52" font-family="Georgia" fill="#1f2630">Content Fixture</text>
+  <text x="140" y="240" font-size="28" font-family="Arial" fill="#1f2630">旧港的潮声像坏掉的钟，隔着锈蚀穹顶敲向深夜。</text>
+  <text x="140" y="300" font-size="28" font-family="Arial" fill="#1f2630">林述踩过积水，看到星门残框里仍有光沿着裂缝游走。</text>
+  <rect x="140" y="352" width="400" height="52" rx="12" fill="#fbe4dd"/>
+  <text x="160" y="387" font-size="22" font-family="Arial" fill="#a33d2e">Sponsored by AI Source Designer</text>
+</svg>
