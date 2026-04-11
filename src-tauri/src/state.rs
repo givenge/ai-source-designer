@@ -19,7 +19,10 @@ pub struct AppPaths {
 
 impl AppPaths {
     pub fn resolve<R: Runtime>(app: &AppHandle<R>) -> Result<Self> {
-        let home_dir = app.path().home_dir().context("failed to resolve home dir")?;
+        let home_dir = app
+            .path()
+            .home_dir()
+            .context("failed to resolve home dir")?;
         let data_dir = home_dir.join(".aisourcedesign");
         let tasks_dir = data_dir.join("tasks");
         let logs_dir = data_dir.join("logs");
@@ -34,7 +37,10 @@ impl AppPaths {
             db_path: data_dir.join("app.sqlite"),
             settings_path: data_dir.join("settings.json"),
             fixtures_dir: repo_root.join("fixtures"),
-            worker_script: repo_root.join("playwright").join("worker").join("index.mjs"),
+            worker_script: repo_root
+                .join("playwright")
+                .join("worker")
+                .join("index.mjs"),
             data_dir,
             tasks_dir,
             logs_dir,
@@ -93,6 +99,7 @@ pub struct AppState {
 pub struct TaskRuntime {
     running: Mutex<HashSet<String>>,
     cancel_requested: Mutex<HashSet<String>>,
+    delete_requested: Mutex<HashSet<String>>,
 }
 
 impl TaskRuntime {
@@ -103,6 +110,10 @@ impl TaskRuntime {
         }
 
         self.cancel_requested
+            .lock()
+            .expect("task runtime poisoned")
+            .remove(task_id);
+        self.delete_requested
             .lock()
             .expect("task runtime poisoned")
             .remove(task_id);
@@ -119,6 +130,10 @@ impl TaskRuntime {
             .lock()
             .expect("task runtime poisoned")
             .remove(task_id);
+        self.delete_requested
+            .lock()
+            .expect("task runtime poisoned")
+            .remove(task_id);
     }
 
     pub fn request_cancel(&self, task_id: &str) {
@@ -128,8 +143,22 @@ impl TaskRuntime {
             .insert(task_id.to_string());
     }
 
+    pub fn request_delete(&self, task_id: &str) {
+        self.delete_requested
+            .lock()
+            .expect("task runtime poisoned")
+            .insert(task_id.to_string());
+    }
+
     pub fn is_cancel_requested(&self, task_id: &str) -> bool {
         self.cancel_requested
+            .lock()
+            .expect("task runtime poisoned")
+            .contains(task_id)
+    }
+
+    pub fn is_delete_requested(&self, task_id: &str) -> bool {
+        self.delete_requested
             .lock()
             .expect("task runtime poisoned")
             .contains(task_id)

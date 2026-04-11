@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import {
+  chatRepairTask as invokeChatRepairTask,
   createTask as invokeCreateTask,
   deleteTask as invokeDeleteTask,
   exportTaskSource,
@@ -20,6 +21,7 @@ export const useTasksStore = defineStore('tasks', {
     running: false,
     exporting: false,
     deleting: false,
+    chatting: false,
     removedTaskIds: [] as string[],
     error: '' as string,
     exportedJson: '' as string,
@@ -75,12 +77,8 @@ export const useTasksStore = defineStore('tasks', {
         if (this.current?.id === taskId) {
           this.current = {
             ...this.current,
-            status: 'sampling',
             errorSummary: null,
-            sourceCandidate: null,
-            validationReport: null,
           };
-          this.artifacts = null;
         }
 
         const result = await invokeStartTask({
@@ -156,6 +154,31 @@ export const useTasksStore = defineStore('tasks', {
         this.error = errorMessage(error, '删除任务失败。');
       } finally {
         this.deleting = false;
+      }
+    },
+    async chatRepair(taskId: string, message: string) {
+      this.chatting = true;
+      this.error = '';
+      const settingsStore = useSettingsStore();
+      try {
+        const result = await invokeChatRepairTask({
+          taskId,
+          message,
+          aiSettings: {
+            baseUrl: settingsStore.settings.baseUrl,
+            model: settingsStore.settings.model,
+          },
+          apiKey: settingsStore.settings.apiKey || null,
+        });
+        this.current = result.task;
+        this.artifacts = await invokeGetTaskArtifacts(taskId);
+        await this.refresh();
+        return result;
+      } catch (error) {
+        this.error = errorMessage(error, '对话修复失败。');
+        throw error;
+      } finally {
+        this.chatting = false;
       }
     },
   },

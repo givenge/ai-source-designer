@@ -4,17 +4,18 @@ mod state;
 mod worker;
 
 use anyhow::Result;
-use domain::{AiSettings, ArtifactBundle, TaskDraft, TaskRecord};
+use domain::{AgentChatRepairResult, AiSettings, ArtifactBundle, TaskDraft, TaskRecord};
 use services::{
-    create_task as create_task_impl, export_task_source as export_task_source_impl,
+    chat_repair_task as chat_repair_task_impl, create_task as create_task_impl,
+    delete_task as delete_task_impl, export_task_source as export_task_source_impl,
     get_task as get_task_impl, get_task_artifacts as get_task_artifacts_impl, init_database,
-    delete_task as delete_task_impl, list_tasks as list_tasks_impl, load_settings as load_settings_impl,
-    run_task as run_task_impl, save_settings as save_settings_impl,
+    list_tasks as list_tasks_impl, load_settings as load_settings_impl, run_task as run_task_impl,
+    save_settings as save_settings_impl,
 };
 use state::{AppPaths, AppState, TaskRuntime};
+use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime, State};
 use tauri_plugin_log::{Target, TargetKind};
-use std::sync::Arc;
 
 fn initialize<R: Runtime>(app: &AppHandle<R>) -> Result<AppState> {
     let paths = AppPaths::resolve(app)?;
@@ -69,6 +70,20 @@ async fn start_task(
 }
 
 #[tauri::command]
+async fn chat_repair_task(
+    state: State<'_, AppState>,
+    task_id: String,
+    message: String,
+    ai_settings: domain::StartAiSettings,
+    api_key: Option<String>,
+) -> Result<AgentChatRepairResult, String> {
+    let app_state = state.inner().clone();
+    chat_repair_task_impl(&app_state, &task_id, &message, ai_settings, api_key)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn get_task_artifacts(
     state: State<'_, AppState>,
     task_id: String,
@@ -97,6 +112,7 @@ pub fn run() {
             delete_task,
             get_task,
             start_task,
+            chat_repair_task,
             get_task_artifacts,
             export_task_source,
         ])

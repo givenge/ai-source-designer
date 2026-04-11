@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-  ai_source_designer_lib::run();
+    ai_source_designer_lib::run();
 }

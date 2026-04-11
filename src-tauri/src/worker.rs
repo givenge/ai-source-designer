@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::SamplingResult;
+use crate::domain::{PageInspection, SamplingResult};
 use crate::state::AppState;
 
 const WORKER_TIMEOUT: Duration = Duration::from_secs(45);
@@ -21,9 +21,20 @@ struct WorkerRequest<'a> {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkerSearchForm<'a> {
+    action: Option<&'a str>,
+    method: Option<&'a str>,
+    query_param: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkerParams<'a> {
     target_url: &'a str,
     test_keyword: Option<&'a str>,
+    role: Option<&'a str>,
+    search_form: Option<WorkerSearchForm<'a>>,
+    wait_for_selector: Option<&'a str>,
     output_dir: String,
     fixtures_dir: String,
 }
@@ -33,6 +44,14 @@ struct WorkerParams<'a> {
 struct WorkerResponse {
     id: u32,
     result: Option<SamplingResult>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InspectWorkerResponse {
+    id: u32,
+    result: Option<PageInspection>,
     error: Option<String>,
 }
 
@@ -48,12 +67,113 @@ pub fn sample_site(
         params: WorkerParams {
             target_url,
             test_keyword,
+            role: None,
+            search_form: None,
+            wait_for_selector: None,
             output_dir: state.paths.task_dir(task_id).to_string_lossy().to_string(),
             fixtures_dir: state.paths.fixtures_dir.to_string_lossy().to_string(),
         },
     };
 
     let payload = serde_json::to_vec(&request)?;
+    let raw = run_worker(state, task_id, &payload)?;
+    let response: WorkerResponse =
+        serde_json::from_str(raw.trim()).context("failed to parse worker response")?;
+
+    if response.id != 1 {
+        return Err(anyhow!("worker response id mismatch"));
+    }
+
+    response.result.ok_or_else(|| {
+        anyhow!(response
+            .error
+            .unwrap_or_else(|| "worker returned no result".into()))
+    })
+}
+
+pub fn inspect_page(
+    state: &AppState,
+    task_id: &str,
+    target_url: &str,
+    role: &str,
+    wait_for_selector: Option<&str>,
+) -> Result<PageInspection> {
+    let request = WorkerRequest {
+        id: 1,
+        method: "inspectPage",
+        params: WorkerParams {
+            target_url,
+            test_keyword: None,
+            role: Some(role),
+            search_form: None,
+            wait_for_selector,
+            output_dir: state.paths.task_dir(task_id).to_string_lossy().to_string(),
+            fixtures_dir: state.paths.fixtures_dir.to_string_lossy().to_string(),
+        },
+    };
+
+    let payload = serde_json::to_vec(&request)?;
+    let raw = run_worker(state, task_id, &payload)?;
+    let response: InspectWorkerResponse =
+        serde_json::from_str(raw.trim()).context("failed to parse worker response")?;
+
+    if response.id != 1 {
+        return Err(anyhow!("worker response id mismatch"));
+    }
+
+    response.result.ok_or_else(|| {
+        anyhow!(response
+            .error
+            .unwrap_or_else(|| "worker returned no result".into()))
+    })
+}
+
+pub fn inspect_search_page(
+    state: &AppState,
+    task_id: &str,
+    target_url: &str,
+    test_keyword: &str,
+    role: &str,
+    form_action: Option<&str>,
+    form_method: Option<&str>,
+    query_param: Option<&str>,
+    wait_for_selector: Option<&str>,
+) -> Result<PageInspection> {
+    let request = WorkerRequest {
+        id: 1,
+        method: "inspectSearchPage",
+        params: WorkerParams {
+            target_url,
+            test_keyword: Some(test_keyword),
+            role: Some(role),
+            search_form: Some(WorkerSearchForm {
+                action: form_action,
+                method: form_method,
+                query_param,
+            }),
+            wait_for_selector,
+            output_dir: state.paths.task_dir(task_id).to_string_lossy().to_string(),
+            fixtures_dir: state.paths.fixtures_dir.to_string_lossy().to_string(),
+        },
+    };
+
+    let payload = serde_json::to_vec(&request)?;
+    let raw = run_worker(state, task_id, &payload)?;
+    let response: InspectWorkerResponse =
+        serde_json::from_str(raw.trim()).context("failed to parse worker response")?;
+
+    if response.id != 1 {
+        return Err(anyhow!("worker response id mismatch"));
+    }
+
+    response.result.ok_or_else(|| {
+        anyhow!(response
+            .error
+            .unwrap_or_else(|| "worker returned no result".into()))
+    })
+}
+
+fn run_worker(state: &AppState, task_id: &str, payload: &[u8]) -> Result<String> {
     let mut child = Command::new("node")
         .arg(&state.paths.worker_script)
         .stdin(Stdio::piped())
@@ -108,15 +228,5 @@ pub fn sample_site(
         return Err(anyhow!("worker failed: {stderr}"));
     }
 
-    let raw = String::from_utf8(output.stdout)?;
-    let response: WorkerResponse =
-        serde_json::from_str(raw.trim()).context("failed to parse worker response")?;
-
-    if response.id != 1 {
-        return Err(anyhow!("worker response id mismatch"));
-    }
-
-    response
-        .result
-        .ok_or_else(|| anyhow!(response.error.unwrap_or_else(|| "worker returned no result".into())))
+    String::from_utf8(output.stdout).context("worker stdout was not utf8")
 }

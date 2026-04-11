@@ -7,6 +7,8 @@ export type TaskStatus =
   | 'completed'
   | 'failed';
 
+export type TaskMode = 'classic' | 'agent';
+
 export interface AiSettings {
   baseUrl: string;
   model: string;
@@ -16,6 +18,7 @@ export interface AiSettings {
 export interface TaskDraft {
   targetUrl: string;
   testKeyword?: string | null;
+  taskMode?: TaskMode;
 }
 
 export interface EvidenceRef {
@@ -39,6 +42,7 @@ export interface RepairStep {
 }
 
 export interface BookListRule {
+  checkKeyWord?: string | null;
   bookList?: string | null;
   name?: string | null;
   author?: string | null;
@@ -51,6 +55,9 @@ export interface BookListRule {
   wordCount?: string | null;
 }
 
+export type SearchRule = BookListRule;
+export type ExploreRule = BookListRule;
+
 export interface BookInfoRule {
   init?: string | null;
   name?: string | null;
@@ -62,31 +69,69 @@ export interface BookInfoRule {
   coverUrl?: string | null;
   wordCount?: string | null;
   tocUrl?: string | null;
+  canReName?: string | null;
+  downloadUrls?: string | null;
 }
 
 export interface TocRule {
+  preUpdateJs?: string | null;
   init?: string | null;
   chapterList?: string | null;
   chapterName?: string | null;
   chapterUrl?: string | null;
+  formatJs?: string | null;
+  isVolume?: string | null;
+  isVip?: string | null;
+  isPay?: string | null;
+  updateTime?: string | null;
   nextTocUrl?: string | null;
 }
 
 export interface ContentRule {
   content?: string | null;
+  title?: string | null;
   nextContentUrl?: string | null;
+  webJs?: string | null;
+  sourceRegex?: string | null;
   replaceRegex?: string | null;
+  imageStyle?: string | null;
+  imageDecode?: string | null;
+  payAction?: string | null;
 }
 
 export interface BookSource {
   bookSourceName: string;
   bookSourceUrl: string;
+  bookSourceGroup?: string | null;
+  bookSourceType?: number | null;
+  bookUrlPattern?: string | null;
+  customOrder?: number | null;
   enabled?: boolean | null;
+  enabledExplore?: boolean | null;
+  enabledCookieJar?: boolean | null;
+  jsLib?: string | null;
+  concurrentRate?: string | null;
+  header?: unknown;
+  loginUrl?: string | null;
+  loginUi?: unknown;
+  loginCheckJs?: string | null;
+  coverDecodeJs?: string | null;
+  lastUpdateTime?: number | null;
+  weight?: number | null;
+  exploreUrl?: string | null;
+  exploreScreen?: unknown;
+  ruleExplore?: ExploreRule | null;
   searchUrl?: string | null;
-  ruleSearch?: BookListRule | null;
+  ruleSearch?: SearchRule | null;
   ruleBookInfo?: BookInfoRule | null;
   ruleToc?: TocRule | null;
   ruleContent?: ContentRule | null;
+  ruleReview?: unknown;
+  bookSourceComment?: string | null;
+  variableComment?: string | null;
+  respondTime?: number | null;
+  loadWithBaseUrl?: boolean | null;
+  singleUrl?: boolean | null;
 }
 
 export interface SourceCandidate {
@@ -105,6 +150,7 @@ export interface ValidationPhase {
 }
 
 export interface ValidationReport {
+  explore: ValidationPhase;
   search: ValidationPhase;
   bookInfo: ValidationPhase;
   toc: ValidationPhase;
@@ -121,6 +167,7 @@ export interface LogEntry {
 export interface TaskRecord {
   id: string;
   status: TaskStatus;
+  taskMode: TaskMode;
   createdAt: string;
   updatedAt: string;
   targetUrl: string;
@@ -139,6 +186,46 @@ export interface ArtifactFile {
   contents: string;
 }
 
+export interface PageLink {
+  label: string;
+  url: string;
+}
+
+export interface PageForm {
+  action: string;
+  method: string;
+  inputNames: string[];
+}
+
+export interface PageInspection {
+  page: {
+    role: string;
+    url: string;
+    htmlPath: string;
+    screenshotPath?: string | null;
+    snippetPaths: string[];
+  };
+  title: string;
+  excerpt: string;
+  links: PageLink[];
+  forms: PageForm[];
+  hints: {
+    bookListCandidates: string[];
+    titleLinkCandidates: string[];
+    tocLinkCandidates: string[];
+    contentCandidates: string[];
+    nextPageCandidates: string[];
+  };
+  networkSamples: {
+    label: string;
+    requestUrl: string;
+    method: string;
+    responsePath: string;
+    notes?: string | null;
+  }[];
+  manifest: ArtifactManifest;
+}
+
 export interface ArtifactBundle {
   manifest: ArtifactManifest;
   screenshots: ArtifactFile[];
@@ -155,4 +242,21 @@ export interface StartTaskPayload {
     model: string;
   };
   apiKey?: string | null;
+}
+
+export interface ChatRepairTaskPayload {
+  taskId: string;
+  message: string;
+  aiSettings: {
+    baseUrl: string;
+    model: string;
+  };
+  apiKey?: string | null;
+}
+
+export interface AgentChatRepairResult {
+  reply: string;
+  applied: boolean;
+  modelRawOutput?: string | null;
+  task: TaskRecord;
 }

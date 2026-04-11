@@ -4,10 +4,12 @@ import {
   isTauri,
   type InvokeArgs,
 } from '@tauri-apps/api/core';
-import { save } from '@tauri-apps/plugin-dialog';
+import { confirm, save } from '@tauri-apps/plugin-dialog';
 import type {
+  AgentChatRepairResult,
   AiSettings,
   ArtifactBundle,
+  ChatRepairTaskPayload,
   StartTaskPayload,
   TaskDraft,
   TaskRecord,
@@ -64,6 +66,17 @@ export async function startTask(payload: StartTaskPayload): Promise<TaskRecord> 
   });
 }
 
+export async function chatRepairTask(
+  payload: ChatRepairTaskPayload,
+): Promise<AgentChatRepairResult> {
+  return invokeOrThrow<AgentChatRepairResult>('chat_repair_task', {
+    taskId: payload.taskId,
+    message: payload.message,
+    aiSettings: payload.aiSettings,
+    apiKey: payload.apiKey,
+  });
+}
+
 export async function getTaskArtifacts(taskId: string): Promise<ArtifactBundle> {
   return invokeOrThrow<ArtifactBundle>('get_task_artifacts', { taskId });
 }
@@ -91,6 +104,23 @@ export async function pickJsonSavePath(defaultPath: string): Promise<string | nu
   });
 
   return typeof selected === 'string' ? selected : null;
+}
+
+export async function confirmAction(message: string): Promise<boolean> {
+  if (isTauriRuntime()) {
+    try {
+      return await confirm(message, {
+        title: 'AI Source Designer',
+        kind: 'warning',
+        okLabel: '删除',
+        cancelLabel: '取消',
+      });
+    } catch (error) {
+      console.error('tauri confirm failed, falling back to window.confirm', error);
+    }
+  }
+
+  return window.confirm(message);
 }
 
 export function toAssetUrl(path: string): string {

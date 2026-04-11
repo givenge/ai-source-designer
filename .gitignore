@@ -10,3 +10,4 @@ artifacts/*
 .env
 .cargo-home
 target-tauri-cli
+.idea
