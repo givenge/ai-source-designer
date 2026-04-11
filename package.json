@@ -12,7 +12,7 @@
     "lint": "eslint .",
     "playwright:install": "playwright install chromium",
     "smoke:live": "node scripts/live-smoke.mjs",
-    "tauri": "cargo tauri"
+    "tauri": "tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
