@@ -50,6 +50,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked --version 2.10.1
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
