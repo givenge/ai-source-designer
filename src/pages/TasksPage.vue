@@ -1,293 +1,270 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 import { useRouter } from 'vue-router';
-import { formatDate } from '@/lib/format';
-import { confirmAction } from '@/lib/tauri';
+import AppIcon from '@/components/icons/AppIcon.vue';
+import MetricCard from '@/components/MetricCard.vue';
+import SegmentedControl from '@/components/SegmentedControl.vue';
 import StatusBadge from '@/components/StatusBadge.vue';
-import type { TaskMode } from '@/types/models';
+import { formatDate } from '@/lib/format';
+import { filterTasks, isTaskActive, siteLabel, taskDuration, taskProgress } from '@/lib/studio';
+import { confirmAction } from '@/lib/tauri';
+import type { TaskMode, TaskRecord } from '@/types/models';
 import { useSettingsStore } from '@/stores/settings';
 import { useTasksStore } from '@/stores/tasks';
 
 const router = useRouter();
-const settingsStore = useSettingsStore();
-const tasksStore = useTasksStore();
-
-const draft = reactive({
-  targetUrl: '',
-  testKeyword: '诡秘之主',
-  taskMode: 'agent' as TaskMode,
-});
-const advancedModeOpen = ref(false);
-
-const taskStats = computed(() => {
-  const records = tasksStore.records;
-  return {
-    total: records.length,
-    completed: records.filter((task) => task.status === 'completed').length,
-    failed: records.filter((task) => task.status === 'failed').length,
-    running: records.filter((task) =>
-      ['sampling', 'synthesizing', 'validating', 'repairing'].includes(task.status),
-    ).length,
-  };
-});
-
-const activeProviderLabel = computed(() => {
-  const baseUrl = settingsStore.settings.baseUrl.trim();
-  if (!baseUrl) {
-    return '未配置';
-  }
-  if (baseUrl.startsWith('mock://')) {
-    return 'mock://fixture';
-  }
-  try {
-    return new URL(baseUrl).host || baseUrl;
-  } catch {
-    return baseUrl;
-  }
-});
-
-const latestTaskLabel = computed(() => {
-  const latest = tasksStore.records[0];
-  return latest ? formatDate(latest.updatedAt) : '暂无任务';
-});
+const settings = useSettingsStore();
+const tasks = useTasksStore();
+const draft = reactive({ targetUrl: '', testKeyword: '星门', taskMode: 'agent' as TaskMode });
+const targetInput = ref<HTMLInputElement | null>(null);
+const query = ref('');
+const filter = ref('all');
+const advanced = ref(false);
+const launching = ref(false);
+const launchError = ref('');
+let refreshTimer: number | undefined;
+const filterOptions = [
+  { value: 'all', label: '全部' }, { value: 'running', label: '运行中' },
+  { value: 'completed', label: '已完成' }, { value: 'failed', label: '失败' },
+];
+const modeOptions = [{ value: 'agent', label: 'Agent 自动分析' }, { value: 'classic', label: 'Classic 调试' }];
+const examples = [
+  { label: 'novel-world', url: 'fixture://novel-world', keyword: '星门' },
+  { label: 'Gutenberg', url: 'https://www.gutenberg.org/', keyword: 'sherlock' },
+];
+const stats = computed(() => ({
+  total: tasks.records.length,
+  completed: tasks.records.filter((task) => task.status === 'completed').length,
+  running: tasks.records.filter(isTaskActive).length,
+  failed: tasks.records.filter((task) => task.status === 'failed').length,
+}));
+const visibleTasks = computed(() => filterTasks(tasks.records, filter.value, query.value));
+const canLaunch = computed(() => Boolean(draft.targetUrl.trim() && settings.hydrated && !settings.loading && settings.ready && !launching.value && !tasks.running && !tasks.runtimeRepairing));
 
 onMounted(async () => {
-  if (!settingsStore.hydrated && !settingsStore.loading) {
-    await settingsStore.hydrate();
-  }
-  await tasksStore.refresh();
+  if (!settings.hydrated && !settings.loading) await settings.hydrate();
+  await tasks.refresh();
+  refreshTimer = window.setInterval(() => {
+    if (tasks.records.some(isTaskActive) && !tasks.loading) void tasks.refresh();
+  }, 2500);
 });
+onUnmounted(() => window.clearInterval(refreshTimer));
 
 async function launchTask() {
-  const result = await tasksStore.create({
-    targetUrl: draft.targetUrl,
-    testKeyword: draft.testKeyword,
-    taskMode: draft.taskMode,
-  });
-  await router.push(`/tasks/${result.id}`);
-  void tasksStore.start(result.id);
+  if (!canLaunch.value) return;
+  launching.value = true;
+  launchError.value = '';
+  try {
+    const task = await tasks.create({ ...draft, targetUrl: draft.targetUrl.trim() });
+    await router.push(`/tasks/${task.id}`);
+    void tasks.start(task.id);
+  } catch (error) {
+    launchError.value = error instanceof Error ? error.message : String(error);
+  } finally { launching.value = false; }
 }
 
-async function deleteTaskRecord(taskId: string) {
-  if (!await confirmAction('确定删除这个任务以及对应证据吗？')) {
-    return;
-  }
-
-  await tasksStore.delete(taskId);
-}
-
-function toggleAdvancedMode() {
-  advancedModeOpen.value = !advancedModeOpen.value;
-  if (!advancedModeOpen.value && draft.taskMode === 'classic') {
-    draft.taskMode = 'agent';
+function shortcut(event: KeyboardEvent) {
+  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault();
+    void launchTask();
   }
 }
+
+async function restart(task: TaskRecord) {
+  await router.push(`/tasks/${task.id}`);
+  if (task.status === 'completed') void tasks.revalidate(task.id);
+  else void tasks.start(task.id);
+}
+
+async function remove(task: TaskRecord) {
+  if (await confirmAction('删除此任务及全部采样证据？此操作无法撤销。')) await tasks.delete(task.id);
+}
+
+function resetFilters() { query.value = ''; filter.value = 'all'; }
 </script>
 
 <template>
-  <section class="page page-home page-home-polished">
-    <header class="page-hero home-hero">
-      <div class="hero-topline">
-        <div class="hero-copy">
-          <p class="eyebrow">
-            Reader-Rust Compatible
-          </p>
-          <h2>AI Source Designer</h2>
-          <p class="hero-lead">
-            采样真实页面，收集证据，再把模型输出压回可验证、可导出的书源 JSON。
-          </p>
-        </div>
-
-        <div class="hero-actions">
-          <RouterLink
-            to="/tasks"
-            class="secondary-button is-active"
-          >
-            任务台
-          </RouterLink>
-          <RouterLink
-            to="/settings"
-            class="secondary-button"
-          >
-            设置
-          </RouterLink>
-        </div>
-      </div>
-
-      <div class="hero-notes">
-        <span>桌面本地运行</span>
-        <span>Playwright 内置采样</span>
-        <span>失败原因可追踪</span>
-      </div>
-
-      <div class="hero-stats">
-        <article class="hero-stat">
-          <span>任务总数</span>
-          <strong>{{ taskStats.total }}</strong>
-          <p>最近更新：{{ latestTaskLabel }}</p>
-        </article>
-        <article class="hero-stat">
-          <span>已完成</span>
-          <strong>{{ taskStats.completed }}</strong>
-          <p>当前失败 {{ taskStats.failed }} 个</p>
-        </article>
-        <article class="hero-stat">
-          <span>运行中</span>
-          <strong>{{ taskStats.running }}</strong>
-          <p>{{ settingsStore.ready ? '配置已就绪' : '请先检查设置' }}</p>
-        </article>
-        <article class="hero-stat">
-          <span>当前 Provider</span>
-          <strong>{{ settingsStore.settings.model || '未设置模型' }}</strong>
-          <p>{{ activeProviderLabel }}</p>
-        </article>
-      </div>
-
-      <div class="hero-workflow">
-        <article>
-          <span>01</span>
-          <strong>采样证据</strong>
-          <p>Agent 驱动 Playwright 采集页面、DOM 与网络样本。</p>
-        </article>
-        <article>
-          <span>02</span>
-          <strong>规则合成</strong>
-          <p>基于证据生成兼容 Reader-Rust 的规则候选。</p>
-        </article>
-        <article>
-          <span>03</span>
-          <strong>验证与修复</strong>
-          <p>本地验证失败后继续修复，直到可导出。</p>
-        </article>
-      </div>
-    </header>
-
-    <div class="dashboard-grid task-home-grid">
-      <section class="panel form-panel task-create-panel">
+  <section class="page tasks-page">
+    <div class="metrics-bar">
+      <MetricCard
+        label="任务总数"
+        :value="stats.total"
+        icon="layers"
+      />
+      <MetricCard
+        label="已完成"
+        :value="stats.completed"
+        icon="check"
+      />
+      <MetricCard
+        label="运行中"
+        :value="stats.running"
+        icon="loader"
+      />
+      <MetricCard
+        label="失败"
+        :value="stats.failed"
+        icon="alert"
+      />
+    </div>
+    <div class="task-dashboard">
+      <form
+        class="panel task-launcher"
+        @submit.prevent="launchTask"
+        @keydown="shortcut"
+      >
         <header class="panel-header">
-          <h3>创建任务</h3>
-          <p>任务输入只保留站点 URL 与测试关键词，AI 配置统一走设置页。</p>
+          <h2><AppIcon name="sparkles" />创建任务</h2>
         </header>
-
-        <label class="field">
-          <span>目标站点 URL</span>
-          <input
-            v-model="draft.targetUrl"
-            type="text"
-            placeholder="fixture://novel-world 或 https://example.com"
+        <label class="field"><span>目标站点 URL</span><input
+          ref="targetInput"
+          v-model="draft.targetUrl"
+          type="text"
+          placeholder="https://example.com"
+          required
+        ></label>
+        <div
+          class="example-links"
+          aria-label="示例站点"
+        >
+          <button
+            v-for="example in examples"
+            :key="example.url"
+            type="button"
+            :title="example.url"
+            @click="draft.targetUrl = example.url; draft.testKeyword = example.keyword"
           >
-        </label>
-
-        <label class="field">
-          <span>测试关键词</span>
-          <input
-            v-model="draft.testKeyword"
-            type="text"
-            placeholder="星门"
-          >
-        </label>
-
-        <div class="mode-panel">
-          <div class="mode-panel__hero">
-            <div>
-              <span class="mode-panel__label">默认入口</span>
-              <strong>Agent 全流程</strong>
-              <p>推荐默认使用模型主导的 Playwright 采样、修复和验证闭环。</p>
-            </div>
-            <button
-              class="secondary-button mode-panel__toggle"
+            <AppIcon
+              :name="example.url.startsWith('fixture:') ? 'cpu' : 'source'"
+              :size="14"
+            />{{ example.label }}
+          </button>
+        </div>
+        <label class="field"><span>测试关键词</span><input
+          v-model="draft.testKeyword"
+          type="text"
+          placeholder="书名或作者"
+        ></label>
+        <div class="field mode-field">
+          <div class="field-heading">
+            <span>任务模式</span><button
               type="button"
-              :data-open="advancedModeOpen"
-              @click="toggleAdvancedMode"
+              class="text-button"
+              :aria-expanded="advanced"
+              @click="advanced = !advanced; !advanced && (draft.taskMode = 'agent')"
             >
-              {{ advancedModeOpen ? '收起高级模式' : '高级 / 调试模式' }}
+              {{ advanced ? '收起' : '高级' }}
             </button>
           </div>
-
+          <SegmentedControl
+            v-if="advanced"
+            v-model="draft.taskMode"
+            :options="modeOptions"
+            label="任务模式"
+          />
           <div
-            v-if="advancedModeOpen"
-            class="mode-panel__advanced"
+            v-else
+            class="mode-current"
           >
-            <label class="mode-choice">
-              <input
-                v-model="draft.taskMode"
-                type="radio"
-                name="task-mode"
-                value="agent"
-              >
-              <div>
-                <strong>Agent 全流程</strong>
-                <p>默认主流程，优先用于真实站点生成与跨站点验证。</p>
-              </div>
-            </label>
-
-            <label class="mode-choice mode-choice--debug">
-              <input
-                v-model="draft.taskMode"
-                type="radio"
-                name="task-mode"
-                value="classic"
-              >
-              <div>
-                <strong>Classic 固定采样</strong>
-                <p>仅用于回归测试、采样排障和执行链路调试，不作为默认入口。</p>
-              </div>
-            </label>
+            <AppIcon
+              name="sparkles"
+              :size="16"
+            /><strong>Agent 自动分析</strong><span class="tiny-badge">默认</span>
           </div>
         </div>
-
         <button
-          class="primary-button"
-          :disabled="tasksStore.running || !settingsStore.ready"
-          @click="launchTask"
+          class="primary-button launch-button"
+          :disabled="!canLaunch"
+          :aria-busy="launching || tasks.running"
+          type="submit"
+          title="Cmd / Ctrl + Enter"
         >
-          {{ tasksStore.running ? '执行中...' : '开始分析' }}
+          <AppIcon
+            :name="launching || tasks.running ? 'loader' : 'play'"
+            :class="{ spinning: launching || tasks.running }"
+            :size="17"
+          />{{ launching ? '创建中' : '开始分析' }}<kbd>⌘ ↵</kbd>
         </button>
-
-        <div class="quick-metrics">
-          <p class="metric-chip">
-            当前模式：{{ draft.taskMode === 'agent' ? 'Agent 全流程' : 'Classic 调试模式' }}
-          </p>
-          <p class="metric-chip">
-            当前模型：{{ settingsStore.settings.model }}
-          </p>
-          <p class="metric-chip metric-chip--soft">
-            {{ settingsStore.settings.baseUrl }}
-          </p>
+        <RouterLink
+          v-if="!settings.ready"
+          class="error-copy"
+          to="/settings"
+        >
+          请先配置 AI 服务
+        </RouterLink>
+        <p
+          v-if="launchError"
+          class="error-copy"
+          role="alert"
+        >
+          {{ launchError }}
+        </p>
+      </form>
+      <section class="panel task-hub">
+        <header class="panel-header panel-header--row">
+          <h2>任务中心</h2><button
+            class="icon-button"
+            type="button"
+            :disabled="tasks.loading"
+            title="刷新任务"
+            aria-label="刷新任务"
+            @click="tasks.refresh()"
+          >
+            <AppIcon
+              name="refresh"
+              :class="{ spinning: tasks.loading }"
+              :size="17"
+            />
+          </button>
+        </header>
+        <div class="task-hub__toolbar">
+          <SegmentedControl
+            v-model="filter"
+            :options="filterOptions"
+            label="任务筛选"
+          />
+          <label class="search-field"><AppIcon
+            name="search"
+            :size="16"
+          /><input
+            v-model="query"
+            type="search"
+            aria-label="搜索任务"
+            placeholder="搜索站点或关键词"
+          ></label>
         </div>
         <p
-          v-if="tasksStore.error"
+          v-if="tasks.error"
           class="error-copy"
+          role="alert"
         >
-          {{ tasksStore.error }}
+          {{ tasks.error }}
         </p>
-      </section>
-
-      <section class="panel">
-        <header class="panel-header">
-          <h3>最近任务</h3>
-          <p>最新任务优先，点击后进入详情页查看证据、日志和导出结果。</p>
-        </header>
-
         <div
-          v-if="tasksStore.records.length"
+          v-if="visibleTasks.length"
           class="task-list"
         >
           <article
-            v-for="task in tasksStore.records"
+            v-for="task in visibleTasks"
             :key="task.id"
             class="task-row"
+            :data-status="task.status"
           >
             <RouterLink
               :to="`/tasks/${task.id}`"
               class="task-row__main"
             >
+              <span class="site-avatar">{{ siteLabel(task.targetUrl).slice(0, 2).toUpperCase() }}</span>
               <div class="task-row__copy">
-                <strong>{{ task.targetUrl }}</strong>
-                <p>{{ formatDate(task.updatedAt) }} / {{ task.taskMode === 'agent' ? 'Agent' : 'Classic' }}</p>
+                <strong :title="task.targetUrl">{{ siteLabel(task.targetUrl) }}</strong>
                 <div class="task-row__meta">
-                  <span v-if="task.testKeyword">关键词：{{ task.testKeyword }}</span>
-                  <span>ID：{{ task.id.slice(0, 8) }}</span>
+                  <span>{{ task.taskMode === 'agent' ? 'Agent' : 'Classic' }}</span><span v-if="task.testKeyword">{{ task.testKeyword }}</span><span>{{ formatDate(task.updatedAt) }}</span><span title="最近一次执行耗时"><AppIcon
+                    name="clock"
+                    :size="13"
+                  />{{ taskDuration(task) }}</span><span
+                    v-if="task.validationReport"
+                    :class="{ 'text-warning': taskProgress(task).passed < taskProgress(task).total }"
+                  >{{ taskProgress(task).passed }}/{{ taskProgress(task).total }} 阶段</span>
                 </div>
                 <p
                   v-if="task.errorSummary"
@@ -297,306 +274,89 @@ function toggleAdvancedMode() {
                 </p>
               </div>
             </RouterLink>
-
             <div class="task-row__actions">
               <StatusBadge :status="task.status" />
-              <button
-                class="danger-button"
-                :disabled="tasksStore.deleting"
-                @click.stop="deleteTaskRecord(task.id)"
+              <RouterLink
+                :to="`/tasks/${task.id}`"
+                class="icon-button"
+                title="查看任务"
+                :aria-label="`查看 ${siteLabel(task.targetUrl)}`"
               >
-                {{ tasksStore.deleting ? '删除中...' : '删除' }}
+                <AppIcon
+                  name="chevronRight"
+                  :size="17"
+                />
+              </RouterLink>
+              <button
+                v-if="['completed', 'failed'].includes(task.status)"
+                class="icon-button"
+                type="button"
+                :disabled="tasks.running"
+                :title="task.status === 'completed' ? '重新验证' : '继续执行'"
+                :aria-label="task.status === 'completed' ? '重新验证' : '继续执行'"
+                @click="restart(task)"
+              >
+                <AppIcon
+                  name="refresh"
+                  :size="16"
+                />
+              </button>
+              <button
+                class="icon-button danger-button"
+                type="button"
+                :disabled="tasks.deleting"
+                title="删除任务"
+                :aria-label="`删除 ${siteLabel(task.targetUrl)}`"
+                @click="remove(task)"
+              >
+                <AppIcon
+                  name="trash"
+                  :size="16"
+                />
               </button>
             </div>
           </article>
         </div>
-
-        <p
+        <div
           v-else
-          class="muted-copy"
+          class="empty-state"
         >
-          还没有任务记录。
-        </p>
+          <svg
+            class="empty-state__art"
+            width="88"
+            height="68"
+            viewBox="0 0 88 68"
+            fill="none"
+            aria-hidden="true"
+          ><rect
+            x="14"
+            y="10"
+            width="60"
+            height="46"
+            rx="8"
+            stroke="currentColor"
+            stroke-width="1.5"
+          /><path
+            d="M14 24h60 M25 17h.01 M32 17h.01 M39 17h.01 M31 38h26 M31 45h16"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          /><path
+            d="M6 34h8 M74 34h8"
+            stroke="currentColor"
+            stroke-dasharray="2 3"
+          /></svg>
+          <strong>{{ tasks.loading ? '读取任务中' : tasks.records.length ? '无匹配任务' : '暂无任务' }}</strong>
+          <button
+            v-if="!tasks.loading"
+            class="secondary-button"
+            type="button"
+            @click="tasks.records.length ? resetFilters() : targetInput?.focus()"
+          >
+            {{ tasks.records.length ? '重置筛选' : '创建任务' }}
+          </button>
+        </div>
       </section>
     </div>
   </section>
 </template>
-
-<style scoped>
-.page-home-polished .home-hero {
-  border-radius: 30px;
-}
-
-.hero-stats {
-  display: grid;
-  gap: 0.85rem;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  margin-top: 1.35rem;
-}
-
-.hero-workflow {
-  margin-top: 1rem;
-  display: grid;
-  gap: 0.75rem;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.hero-workflow article {
-  border: 1px solid rgba(19, 32, 51, 0.1);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.64);
-  padding: 0.75rem 0.78rem;
-}
-
-.hero-workflow span {
-  display: inline-flex;
-  min-width: 1.8rem;
-  height: 1.8rem;
-  align-items: center;
-  justify-content: center;
-  border-radius: 8px;
-  margin-bottom: 0.34rem;
-  background: linear-gradient(135deg, rgba(176, 99, 42, 0.2), rgba(33, 71, 111, 0.2));
-  color: #223754;
-  font-size: 0.82rem;
-  font-weight: 700;
-}
-
-.hero-workflow strong {
-  display: block;
-  color: #1f2a37;
-  margin-bottom: 0.2rem;
-}
-
-.hero-workflow p {
-  margin: 0;
-  color: #607083;
-  font-size: 0.84rem;
-  line-height: 1.45;
-}
-
-.hero-stat {
-  padding: 0.95rem 1rem;
-  border: 1px solid rgba(31, 38, 48, 0.08);
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.52);
-  min-width: 0;
-}
-
-.hero-stat span {
-  display: block;
-  margin-bottom: 0.35rem;
-  font-size: 0.78rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: #8b6b4d;
-}
-
-.hero-stat strong {
-  display: block;
-  font-size: 1.3rem;
-  line-height: 1.1;
-  color: #1f2a37;
-  overflow-wrap: anywhere;
-}
-
-.hero-stat p {
-  margin: 0.38rem 0 0;
-  color: #657182;
-  line-height: 1.4;
-  overflow-wrap: anywhere;
-}
-
-.task-home-grid {
-  align-items: start;
-}
-
-.task-create-panel {
-  position: sticky;
-  top: 1rem;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.5)),
-    rgba(248, 242, 230, 0.72);
-}
-
-.task-create-panel .field input,
-.task-create-panel .field select {
-  width: 100%;
-  padding: 0.95rem 1rem;
-  border: 1px solid rgba(31, 38, 48, 0.14);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.86);
-  transition: border-color 0.18s ease, box-shadow 0.18s ease;
-}
-
-.task-create-panel .field input:focus,
-.task-create-panel .field select:focus {
-  outline: none;
-  border-color: rgba(188, 93, 46, 0.45);
-  box-shadow: 0 0 0 3px rgba(188, 93, 46, 0.12);
-}
-
-.mode-panel {
-  margin-bottom: 1rem;
-  border: 1px solid rgba(31, 38, 48, 0.1);
-  border-radius: 18px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(255, 255, 255, 0.62)),
-    rgba(244, 236, 221, 0.55);
-  overflow: hidden;
-}
-
-.mode-panel__hero {
-  display: grid;
-  gap: 0.75rem;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
-  padding: 0.95rem 1rem;
-}
-
-.mode-panel__label {
-  display: block;
-  margin-bottom: 0.28rem;
-  color: #8b5d2a;
-  font-size: 0.76rem;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-.mode-panel__hero strong {
-  display: block;
-  font-size: 1.02rem;
-  color: #1f2a37;
-}
-
-.mode-panel__hero p {
-  margin: 0.35rem 0 0;
-  color: #5b6776;
-  line-height: 1.5;
-}
-
-.mode-panel__toggle[data-open='true'] {
-  background: rgba(168, 90, 31, 0.12);
-  border-color: rgba(168, 90, 31, 0.22);
-}
-
-.mode-panel__advanced {
-  display: grid;
-  gap: 0.7rem;
-  padding: 0 1rem 1rem;
-  border-top: 1px solid rgba(31, 38, 48, 0.08);
-}
-
-.mode-choice {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 0.8rem;
-  align-items: start;
-  padding: 0.9rem;
-  border: 1px solid rgba(31, 38, 48, 0.1);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.72);
-  cursor: pointer;
-}
-
-.mode-choice input {
-  margin-top: 0.2rem;
-}
-
-.mode-choice strong {
-  display: block;
-  color: #1f2a37;
-}
-
-.mode-choice p {
-  margin: 0.26rem 0 0;
-  color: #5c6877;
-  line-height: 1.45;
-}
-
-.mode-choice--debug {
-  background: rgba(247, 244, 238, 0.82);
-}
-
-.quick-metrics {
-  margin-top: 0.75rem;
-  display: grid;
-  gap: 0.45rem;
-}
-
-.metric-chip {
-  margin: 0;
-  padding: 0.5rem 0.65rem;
-  border-radius: 10px;
-  border: 1px solid rgba(31, 38, 48, 0.1);
-  background: rgba(255, 255, 255, 0.66);
-  color: #4d596b;
-  font-size: 0.86rem;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
-
-.metric-chip--soft {
-  color: #6d7785;
-  font-size: 0.82rem;
-}
-
-.task-row {
-  transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
-}
-
-.task-row:hover {
-  transform: translateY(-1px);
-  border-color: rgba(31, 38, 48, 0.2);
-  box-shadow: 0 10px 26px rgba(52, 39, 24, 0.08);
-}
-
-.task-row__meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.45rem 0.7rem;
-  margin-top: 0.45rem;
-  color: #6f7a89;
-  font-size: 0.82rem;
-}
-
-.task-row__meta span {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.24rem 0.52rem;
-  border-radius: 999px;
-  background: rgba(31, 38, 48, 0.06);
-}
-
-.task-row__error {
-  margin-top: 0.55rem;
-  color: #a24d3d;
-  font-size: 0.86rem;
-  line-height: 1.45;
-}
-
-@media (max-width: 1080px) {
-  .task-create-panel {
-    position: static;
-  }
-
-  .mode-panel__hero {
-    grid-template-columns: 1fr;
-  }
-
-  .hero-stats {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .hero-workflow {
-    grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 720px) {
-  .hero-stats {
-    grid-template-columns: 1fr;
-  }
-}
-</style>

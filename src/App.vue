@@ -1,10 +1,9 @@
 <script setup lang="ts">
+import AppShell from '@/components/AppShell.vue';
 </script>
 
 <template>
-  <div class="app-frame">
-    <main class="shell-main">
-      <RouterView />
-    </main>
-  </div>
+  <AppShell>
+    <RouterView />
+  </AppShell>
 </template>

@@ -8,15 +8,7 @@ pub(super) async fn run_task(
 ) -> Result<TaskRecord> {
     let _guard = RunningTaskGuard::register(state, task_id)?;
     let paths = &state.paths;
-    let api_key = api_key
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            load_settings(paths)
-                .ok()
-                .map(|settings| settings.api_key.trim().to_string())
-                .filter(|value| !value.is_empty())
-        });
+    let api_key = Some(resolve_model_key(paths, &ai_settings, api_key));
 
     let mut task = get_task(paths, task_id)?;
     task.error_summary = None;
@@ -46,7 +38,7 @@ pub(super) async fn run_task(
             .map(|sampled| sampled.pages.is_empty() || !agent_has_minimum_coverage(&sampled.pages))
             .unwrap_or(true);
 
-        let sampled = if need_sampling {
+        let mut sampled = if need_sampling {
             ensure_not_cancelled(state, &task.id)?;
             let sampling_message = match task.task_mode {
                 TaskMode::Agent if existing_sampled.is_some() => {
@@ -60,7 +52,7 @@ pub(super) async fn run_task(
             task.status = TaskStatus::Sampling;
             persist_and_flush(state, &mut task)?;
 
-            let sampled = match task.task_mode {
+            let mut sampled = match task.task_mode {
                 TaskMode::Agent => {
                     run_agent_sampling(
                         state,
@@ -78,6 +70,12 @@ pub(super) async fn run_task(
                     task.test_keyword.as_deref(),
                 )?),
             };
+            sampled
+                .pages
+                .retain(|page| is_site_url(&task.target_url, &page.url));
+            sampled
+                .network_samples
+                .retain(|sample| is_site_url(&task.target_url, &sample.request_url));
             ensure_not_cancelled(state, &task.id)?;
             task.artifact_manifest = Some(sampled.manifest.clone());
             append_log(
@@ -103,6 +101,7 @@ pub(super) async fn run_task(
         };
 
         ensure_not_cancelled(state, &task.id)?;
+        explore::capture_next_page(state, &mut task, &mut sampled)?;
         let mut candidate = if let Some(existing) = task.source_candidate.clone() {
             append_log(
                 &mut task,
@@ -139,6 +138,8 @@ pub(super) async fn run_task(
             candidate
         };
 
+        explore::complete_pagination(paths, &task.id, &sampled, &mut candidate.book_source)?;
+        task.source_candidate = Some(candidate.clone());
         ensure_not_cancelled(state, &task.id)?;
         append_log(
             &mut task,
@@ -164,9 +165,14 @@ pub(super) async fn run_task(
         };
         ensure_not_cancelled(state, &task.id)?;
         task.validation_report = Some(report.clone());
+        append_log(
+            &mut task,
+            TaskStatus::Validating,
+            format!("验证结果：{}", serde_json::to_string(&report)?),
+        );
         persist_and_flush(state, &mut task)?;
 
-        if validation_error.is_some() || report_requires_repair(&report) {
+        if validation_error.is_some() || report_requires_repair(&report, &candidate.book_source) {
             task.status = TaskStatus::Repairing;
             append_log(
                 &mut task,
@@ -175,10 +181,11 @@ pub(super) async fn run_task(
             );
             persist_and_flush(state, &mut task)?;
 
-            let failure_summary = validation_error
-                .clone()
-                .unwrap_or_else(|| first_failure_summary(&report));
-            let mut repaired = try_repair_candidate_with_model(
+            let failure_summary = match &validation_error {
+                Some(error) => error.clone(),
+                None => serde_json::to_string_pretty(&report)?,
+            };
+            let mut repaired = match try_repair_candidate_with_model(
                 paths,
                 &task.id,
                 &sampled,
@@ -187,7 +194,18 @@ pub(super) async fn run_task(
                 &mut candidate,
                 &failure_summary,
             )
-            .await?;
+            .await
+            {
+                Ok(repaired) => repaired,
+                Err(error) => {
+                    append_log(
+                        &mut task,
+                        TaskStatus::Repairing,
+                        format!("模型修复失败：{error}；继续尝试本地采样证据修复。"),
+                    );
+                    false
+                }
+            };
 
             if !repaired {
                 repaired = try_repair_candidate_with_sampled(
@@ -200,6 +218,14 @@ pub(super) async fn run_task(
             }
 
             if repaired {
+                explore::complete_pagination(
+                    paths,
+                    &task.id,
+                    &sampled,
+                    &mut candidate.book_source,
+                )?;
+                task.source_candidate = Some(candidate.clone());
+                persist_and_flush(state, &mut task)?;
                 report = validate_candidate(
                     paths,
                     &task.id,
@@ -208,12 +234,14 @@ pub(super) async fn run_task(
                     task.test_keyword.as_deref(),
                 )?;
                 ensure_not_cancelled(state, &task.id)?;
-                task.source_candidate = Some(candidate.clone());
                 task.validation_report = Some(report.clone());
                 append_log(
                     &mut task,
                     TaskStatus::Repairing,
-                    "已应用修复策略并重新验证。",
+                    format!(
+                        "已应用修复策略并重新验证：{}",
+                        serde_json::to_string(&report)?
+                    ),
                 );
                 persist_and_flush(state, &mut task)?;
             } else {
@@ -225,6 +253,18 @@ pub(super) async fn run_task(
         let success = report_is_usable(&report);
 
         if success {
+            if !report.explore.passed && candidate.book_source.explore_url.is_some() {
+                candidate.book_source.enabled_explore = Some(false);
+                append_log(
+                    &mut task,
+                    TaskStatus::Completed,
+                    format!(
+                        "书海未通过验证，已关闭书海入口并保留已验证的搜索能力：{}",
+                        report.explore.summary
+                    ),
+                );
+            }
+            task.source_candidate = Some(candidate.clone());
             task.status = TaskStatus::Completed;
             task.error_summary = None;
             let exported = export_candidate(paths, &task.id, &candidate)?;
@@ -255,6 +295,9 @@ pub(super) async fn run_task(
         };
         task.status = TaskStatus::Failed;
         task.error_summary = Some(summary.clone());
+        if let Ok(Some(sampled)) = load_sampled_from_task(paths, &task) {
+            task.artifact_manifest = Some(sampled.manifest);
+        }
         if cancelled {
             append_log(&mut task, TaskStatus::Failed, summary.clone());
         } else {

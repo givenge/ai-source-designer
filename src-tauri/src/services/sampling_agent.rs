@@ -3,60 +3,6 @@ use super::*;
 const AGENT_MAX_ROUNDS: usize = 4;
 const AGENT_MAX_ACTIONS_PER_ROUND: usize = 2;
 
-fn merge_search_fallback_result(
-    pages: &mut Vec<crate::domain::PageSample>,
-    network_samples: &mut Vec<crate::domain::NetworkSample>,
-    manifest: &mut ArtifactManifest,
-    sampled: SamplingResult,
-) {
-    for page in sampled.pages {
-        if page.role != "search" {
-            continue;
-        }
-        if !pages
-            .iter()
-            .any(|existing| existing.role == page.role && existing.url == page.url)
-        {
-            pages.push(page);
-        }
-    }
-
-    for entry in sampled.manifest.dom {
-        if entry.contains("/search.") && !manifest.dom.iter().any(|existing| existing == &entry) {
-            manifest.dom.push(entry);
-        }
-    }
-    for entry in sampled.manifest.screenshots {
-        if entry.contains("/search.")
-            && !manifest
-                .screenshots
-                .iter()
-                .any(|existing| existing == &entry)
-        {
-            manifest.screenshots.push(entry);
-        }
-    }
-    for entry in sampled.manifest.network {
-        if entry.contains("/live-") && !manifest.network.iter().any(|existing| existing == &entry) {
-            manifest.network.push(entry);
-        }
-    }
-    for entry in sampled.manifest.logs {
-        if !manifest.logs.iter().any(|existing| existing == &entry) {
-            manifest.logs.push(entry);
-        }
-    }
-
-    for sample in sampled.network_samples {
-        if !network_samples
-            .iter()
-            .any(|existing| existing.response_path == sample.response_path)
-        {
-            network_samples.push(sample);
-        }
-    }
-}
-
 pub(super) async fn run_agent_sampling(
     state: &AppState,
     task: &TaskRecord,
@@ -73,16 +19,9 @@ pub(super) async fn run_agent_sampling(
         );
     }
 
-    let api_key = api_key
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| {
-            load_settings(&state.paths)
-                .ok()
-                .map(|settings| settings.api_key)
-                .filter(|value| !value.trim().is_empty())
-        });
+    let key = resolve_model_key(&state.paths, ai_settings, api_key);
 
-    if ai_settings.base_url.starts_with("mock://") || api_key.is_none() {
+    if ai_settings.base_url.starts_with("mock://") {
         return worker::sample_site(
             state,
             &task.id,
@@ -122,6 +61,7 @@ pub(super) async fn run_agent_sampling(
     if !pages.iter().any(|page| page.role == "landing") {
         let landing = worker::inspect_page(state, &task.id, &task.target_url, "landing", None)?;
         merge_inspection(
+            &task.target_url,
             &mut pages,
             &mut network_samples,
             &mut manifest,
@@ -130,7 +70,6 @@ pub(super) async fn run_agent_sampling(
         );
     }
 
-    let key = api_key.expect("checked api key presence");
     for round in 0..AGENT_MAX_ROUNDS {
         ensure_not_cancelled(state, &task.id)?;
         if agent_has_minimum_coverage(&pages) {
@@ -182,7 +121,7 @@ pub(super) async fn run_agent_sampling(
                 continue;
             }
 
-            if let Some(reason) = validate_agent_action(&action, &observed) {
+            if let Some(reason) = validate_agent_action(&action, &observed, &task.target_url) {
                 log_to_task_file(
                     &state.paths,
                     &task.id,
@@ -216,7 +155,7 @@ pub(super) async fn run_agent_sampling(
                 ),
             )?;
 
-            let inspection = match action.kind.trim().to_ascii_lowercase().as_str() {
+            let inspection_result = match action.kind.trim().to_ascii_lowercase().as_str() {
                 "search" => {
                     let Some(keyword) = task
                         .test_keyword
@@ -235,7 +174,7 @@ pub(super) async fn run_agent_sampling(
                         action.form_method.as_deref(),
                         action.query_param.as_deref(),
                         action.wait_for_selector.as_deref(),
-                    )?
+                    )
                 }
                 _ => worker::inspect_page(
                     state,
@@ -243,7 +182,20 @@ pub(super) async fn run_agent_sampling(
                     url,
                     &role,
                     action.wait_for_selector.as_deref(),
-                )?,
+                ),
+            };
+            let inspection = match inspection_result {
+                Ok(inspection) => inspection,
+                Err(error) if action.kind.eq_ignore_ascii_case("search") => {
+                    opened_keys.insert(key_ref);
+                    log_to_task_file(
+                        &state.paths,
+                        &task.id,
+                        &format!("{} [\"sampling\"] search-unavailable url={} reason={error}; continue with explore\n", Utc::now().to_rfc3339(), url),
+                    )?;
+                    continue;
+                }
+                Err(error) => return Err(error),
             };
 
             opened_keys.insert(key_ref);
@@ -265,13 +217,22 @@ pub(super) async fn run_agent_sampling(
                     ),
                 )?;
             }
-            merge_inspection(
+            let captured_url = inspection.page.url.clone();
+            if !merge_inspection(
+                &task.target_url,
                 &mut pages,
                 &mut network_samples,
                 &mut manifest,
                 &mut inspections,
                 inspection,
-            );
+            ) {
+                log_to_task_file(
+                    &state.paths,
+                    &task.id,
+                    &format!("{} [\"sampling\"] agent-page-rejected role={role} url={captured_url} reason=outside-target-site\n", Utc::now().to_rfc3339()),
+                )?;
+                continue;
+            }
 
             if (role == "explore" || role == "search")
                 && !pages.iter().any(|page| page.role == "book")
@@ -284,6 +245,7 @@ pub(super) async fn run_agent_sampling(
                         task.test_keyword.as_deref(),
                     )
                     .or_else(|| infer_followup_book_url(page, task.test_keyword.as_deref()))
+                    .filter(|url| is_site_url(&task.target_url, url))
                 }) {
                     let book_key = format!("{}::book", canonical_agent_key(&book_url));
                     if !opened_keys.contains(&book_key) {
@@ -301,6 +263,7 @@ pub(super) async fn run_agent_sampling(
                             worker::inspect_page(state, &task.id, &book_url, "book", None)?;
                         opened_keys.insert(book_key);
                         merge_inspection(
+                            &task.target_url,
                             &mut pages,
                             &mut network_samples,
                             &mut manifest,
@@ -319,6 +282,7 @@ pub(super) async fn run_agent_sampling(
                 if let Some(toc_url) = inspections.last().and_then(|page| {
                     infer_followup_toc_url_from_dom(&state.paths, &task.id, page)
                         .or_else(|| infer_followup_toc_url(page))
+                        .filter(|url| is_site_url(&task.target_url, url))
                 }) {
                     let toc_key = format!("{}::toc", canonical_agent_key(&toc_url));
                     if !opened_keys.contains(&toc_key) {
@@ -340,6 +304,7 @@ pub(super) async fn run_agent_sampling(
                         )?;
                         opened_keys.insert(toc_key);
                         merge_inspection(
+                            &task.target_url,
                             &mut pages,
                             &mut network_samples,
                             &mut manifest,
@@ -351,16 +316,14 @@ pub(super) async fn run_agent_sampling(
             }
 
             if !pages.iter().any(|page| page.role == "content")
-                && inspections.last().is_some_and(|page| {
-                    matches!(
-                        page.page.role.as_str(),
-                        "explore" | "search" | "book" | "toc"
-                    )
-                })
+                && inspections
+                    .last()
+                    .is_some_and(|page| matches!(page.page.role.as_str(), "book" | "toc"))
             {
                 if let Some(content_url) = inspections.last().and_then(|page| {
                     infer_followup_content_url_from_dom(&state.paths, &task.id, page)
                         .or_else(|| infer_followup_content_url(page))
+                        .filter(|url| is_site_url(&task.target_url, url))
                 }) {
                     let content_key = format!("{}::content", canonical_agent_key(&content_url));
                     if !opened_keys.contains(&content_key) {
@@ -382,6 +345,7 @@ pub(super) async fn run_agent_sampling(
                             worker::inspect_page(state, &task.id, &content_url, "content", None)?;
                         opened_keys.insert(content_key);
                         merge_inspection(
+                            &task.target_url,
                             &mut pages,
                             &mut network_samples,
                             &mut manifest,
@@ -392,16 +356,6 @@ pub(super) async fn run_agent_sampling(
                 }
             }
         }
-    }
-
-    if !pages.iter().any(|page| page.role == "search") {
-        let fallback = worker::sample_site(
-            state,
-            &task.id,
-            &task.target_url,
-            task.test_keyword.as_deref(),
-        )?;
-        merge_search_fallback_result(&mut pages, &mut network_samples, &mut manifest, fallback);
     }
 
     Ok(SamplingResult {

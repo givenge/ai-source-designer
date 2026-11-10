@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
-import type { AiSettings } from '@/types/models';
-import { loadSettings, saveSettings } from '@/lib/tauri';
+import type { AiSettings, ConnectionTestResult } from '@/types/models';
+import { loadSettings, saveSettings, testAiConnection } from '@/lib/tauri';
 
 const defaultSettings = (): AiSettings => ({
   baseUrl: 'mock://fixture',
@@ -15,10 +15,24 @@ export const useSettingsStore = defineStore('settings', {
     loading: false,
     saving: false,
     error: '' as string,
+    savedSettings: null as AiSettings | null,
+    testing: false,
+    connection: null as ConnectionTestResult | null,
+    connectionError: '',
+    connectionSettings: null as AiSettings | null,
   }),
   getters: {
     ready(state) {
-      return Boolean(state.settings.baseUrl && state.settings.model);
+      return Boolean(state.settings.baseUrl.trim() && state.settings.model.trim());
+    },
+    saved(state): boolean {
+      return JSON.stringify(state.savedSettings) === JSON.stringify(state.settings);
+    },
+    connectionStatus(state): 'unknown' | 'testing' | 'mock' | 'connected' | 'failed' {
+      if (state.testing) return 'testing';
+      if (JSON.stringify(state.connectionSettings) !== JSON.stringify(state.settings)) return 'unknown';
+      if (state.connectionError) return 'failed';
+      return state.connection ? (state.connection.mock ? 'mock' : 'connected') : 'unknown';
     },
   },
   actions: {
@@ -29,6 +43,7 @@ export const useSettingsStore = defineStore('settings', {
       try {
         const loaded = await withTimeout(loadSettings(), 3000, '读取桌面设置超时');
         this.settings = loaded;
+        this.savedSettings = { ...loaded };
         this.hydrated = true;
       } catch (error) {
         this.error = `加载桌面设置失败：${errorMessage(error, '未知错误')}`;
@@ -43,6 +58,8 @@ export const useSettingsStore = defineStore('settings', {
       this.error = '';
       const nextSettings = {
         ...this.settings,
+        baseUrl: this.settings.baseUrl.trim(),
+        model: this.settings.model.trim(),
         apiKey: this.settings.apiKey.trim(),
       };
       this.settings = nextSettings;
@@ -53,10 +70,26 @@ export const useSettingsStore = defineStore('settings', {
           3000,
           '写入 settings.json 超时',
         );
+        this.savedSettings = { ...this.settings };
       } catch (error) {
         this.error = `设置写入失败：${errorMessage(error, '未知错误')}`;
       } finally {
         this.saving = false;
+      }
+    },
+    async testConnection() {
+      if (!this.ready || this.testing) return;
+      this.testing = true;
+      this.connectionError = '';
+      this.connection = null;
+      const settings = { ...this.settings };
+      try {
+        this.connection = await testAiConnection(settings);
+      } catch (error) {
+        this.connectionError = errorMessage(error, '连接测试失败');
+      } finally {
+        this.connectionSettings = settings;
+        this.testing = false;
       }
     },
   },

@@ -37,6 +37,9 @@ pub(super) fn write_export_file(path: &Path, raw: &str) -> Result<()> {
 }
 
 pub(super) fn exportable_book_source_value(book_source: &BookSource) -> Result<Value> {
+    let mut normalized = book_source.clone();
+    super::candidate_parser::normalize_book_source_rules(&mut normalized);
+    let book_source = &normalized;
     let mut value = serde_json::to_value(book_source)?;
 
     if is_22biqu_mobile_template(book_source) {

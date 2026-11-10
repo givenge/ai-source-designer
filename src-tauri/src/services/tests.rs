@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::domain::{
     AiSettings, ArtifactManifest, BookInfoRule, ContentRule, SearchRule, SourceCandidate, TocRule,
@@ -49,6 +48,572 @@ fn good_candidate() -> SourceCandidate {
     }
 }
 
+fn diagnostic_test_paths() -> AppPaths {
+    let root = std::env::temp_dir().join(format!("asd-diagnostics-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(root.join("tasks")).unwrap();
+    AppPaths {
+        data_dir: root.clone(),
+        db_path: root.join("app.sqlite"),
+        tasks_dir: root.join("tasks"),
+        logs_dir: root.join("logs"),
+        settings_path: root.join("settings.json"),
+        fixtures_dir: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures"),
+        worker_script: root.join("worker.mjs"),
+    }
+}
+
+fn mock_model_server(status: u16, body: String) -> (String, std::thread::JoinHandle<Vec<u8>>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0; 4096];
+            let count = stream.read(&mut chunk).unwrap();
+            assert!(count > 0, "request ended before its body was received");
+            request.extend_from_slice(&chunk[..count]);
+            if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                let length = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length: "))
+                    .unwrap_or("0")
+                    .parse::<usize>()
+                    .unwrap();
+                if request.len() >= end + 4 + length {
+                    break;
+                }
+            }
+        }
+        write!(
+            stream,
+            "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        request
+    });
+    (endpoint, server)
+}
+
+#[test]
+fn connection_probe_checks_models_redacts_errors_and_supports_local_no_auth() {
+    for (status, body, secret, expected_error) in [
+        (
+            200,
+            json!({"data":[{"id":"local-model"}]}).to_string(),
+            "",
+            None,
+        ),
+        (
+            401,
+            "unauthorized test-private-key".into(),
+            "test-private-key",
+            Some("HTTP 401"),
+        ),
+        (
+            200,
+            json!({"data":[{"id":"other-model"}]}).to_string(),
+            "test-private-key",
+            Some("未找到"),
+        ),
+        (200, "<html>not an API</html>".into(), "", Some("模型列表")),
+    ] {
+        let (base_url, server) = mock_model_server(status, body);
+        let result = tauri::async_runtime::block_on(test_ai_connection(&AiSettings {
+            base_url: format!("{base_url}/chat/completions"),
+            model: " local-model ".into(),
+            api_key: secret.into(),
+        }));
+        let request = String::from_utf8(server.join().unwrap()).unwrap();
+        assert!(request.starts_with("GET /v1/models HTTP/1.1"));
+        assert_eq!(
+            request.to_ascii_lowercase().contains("authorization:"),
+            !secret.is_empty()
+        );
+        if let Some(expected) = expected_error {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("test-private-key"));
+        } else {
+            let result = result.unwrap();
+            assert_eq!(result.model, "local-model");
+            assert!(!result.mock);
+        }
+    }
+    let mock = tauri::async_runtime::block_on(test_ai_connection(&AiSettings::default())).unwrap();
+    assert!(mock.mock);
+    assert!(
+        tauri::async_runtime::block_on(test_ai_connection(&AiSettings {
+            base_url: "file:///tmp/api".into(),
+            model: "local".into(),
+            api_key: "".into(),
+        }))
+        .unwrap_err()
+        .to_string()
+        .contains("http 或 https")
+    );
+}
+
+#[test]
+fn model_key_fallback_is_scoped_to_the_saved_endpoint_and_respects_empty_input() {
+    let paths = diagnostic_test_paths();
+    save_settings(
+        &paths,
+        &AiSettings {
+            base_url: "https://saved.example/v1/".into(),
+            model: "saved".into(),
+            api_key: "saved-private-key".into(),
+        },
+    )
+    .unwrap();
+    let mut requested = StartAiSettings {
+        base_url: "https://saved.example/v1/chat/completions".into(),
+        model: "another-model".into(),
+    };
+    assert_eq!(
+        resolve_model_key(&paths, &requested, None),
+        "saved-private-key"
+    );
+    assert_eq!(resolve_model_key(&paths, &requested, Some("  ".into())), "");
+    requested.base_url = "http://127.0.0.1:11434/v1".into();
+    assert_eq!(resolve_model_key(&paths, &requested, None), "");
+    assert_eq!(
+        resolve_model_key(&paths, &requested, Some(" explicit-key ".into())),
+        "explicit-key"
+    );
+    assert_eq!(load_settings(&paths).unwrap().api_key, "saved-private-key");
+    fs::remove_dir_all(paths.data_dir).unwrap();
+}
+
+#[test]
+fn runtime_diagnostics_report_missing_runtime_without_creating_a_database() {
+    let paths = diagnostic_test_paths();
+    let missing = runtime_diagnostics(&paths);
+    assert!(!missing.database_ready);
+    assert!(!missing.worker_ready);
+    assert!(missing.error.unwrap().contains("Worker 文件缺失"));
+    assert!(!paths.db_path.exists());
+    init_database(&paths).unwrap();
+    assert!(runtime_diagnostics(&paths).database_ready);
+    fs::remove_dir_all(paths.data_dir).unwrap();
+}
+
+#[test]
+fn runtime_repair_obeys_task_lock_and_releases_it_after_failure() {
+    let paths = diagnostic_test_paths();
+    let state = AppState {
+        paths: paths.clone(),
+        runtime: Arc::new(TaskRuntime::default()),
+    };
+    assert!(state.runtime.register("busy-task"));
+    assert!(repair_playwright(&state)
+        .unwrap_err()
+        .to_string()
+        .contains("任务执行中"));
+    assert!(!paths.logs_dir.exists());
+    state.runtime.unregister("busy-task");
+    assert!(repair_playwright(&state)
+        .unwrap_err()
+        .to_string()
+        .contains("Worker 文件缺失"));
+    assert!(!state.runtime.is_runtime_repairing());
+    assert!(state.runtime.register("next-task"));
+    assert!(crate::worker_runtime::repair_log(&paths).contains("Worker 文件缺失"));
+    fs::remove_dir_all(paths.data_dir).unwrap();
+}
+
+#[test]
+fn log_export_copies_the_original_and_rejects_unknown_log_types() {
+    let paths = diagnostic_test_paths();
+    init_database(&paths).unwrap();
+    let task = create_task(
+        &paths,
+        crate::domain::TaskDraft {
+            target_url: "fixture://novel-world".into(),
+            test_keyword: None,
+            task_mode: TaskMode::Classic,
+        },
+    )
+    .unwrap();
+    let original = paths.task_path(&task.id, "logs/task.log");
+    let raw = "original task log\nmodel-response: {\"ok\":true}\n";
+    fs::write(&original, raw).unwrap();
+    let destination = paths.data_dir.join("exported.log");
+    export_task_log(&paths, &task.id, "task", destination.to_str().unwrap()).unwrap();
+    assert_eq!(fs::read_to_string(&destination).unwrap(), raw);
+    assert_eq!(fs::read_to_string(original).unwrap(), raw);
+    assert!(export_task_log(
+        &paths,
+        &task.id,
+        "../../settings.json",
+        destination.to_str().unwrap()
+    )
+    .is_err());
+    assert!(export_task_log(&paths, &task.id, "task", "").is_err());
+    fs::remove_dir_all(paths.data_dir).unwrap();
+}
+
+#[test]
+fn revalidation_uses_cached_evidence_keeps_failed_reports_and_obeys_the_run_lock() {
+    let paths = diagnostic_test_paths();
+    init_database(&paths).unwrap();
+    let mut task = create_task(
+        &paths,
+        crate::domain::TaskDraft {
+            target_url: "https://fixture.novel.world".into(),
+            test_keyword: Some("星门".into()),
+            task_mode: TaskMode::Classic,
+        },
+    )
+    .unwrap();
+    let fixture = paths.fixtures_dir.join("novel-world");
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(fixture.join("manifest.json")).unwrap()).unwrap();
+    let mut captures = String::new();
+    for page in manifest["pages"].as_array().unwrap() {
+        let role = page["role"].as_str().unwrap();
+        fs::copy(
+            fixture.join(page["htmlFile"].as_str().unwrap()),
+            paths.task_path(&task.id, &format!("dom/{role}.html")),
+        )
+        .unwrap();
+        captures.push_str(&format!(
+            "capture role={role} url={}\n",
+            page["url"].as_str().unwrap()
+        ));
+    }
+    fs::write(paths.task_path(&task.id, "logs/worker.log"), captures).unwrap();
+    let original = fs::read(paths.task_path(&task.id, "dom/content.html")).unwrap();
+    let mut candidate = good_candidate();
+    candidate.book_source.explore_url =
+        Some("https://fixture.novel.world/ranks?page={{page}}".into());
+    candidate.book_source.enabled_explore = Some(true);
+    task.source_candidate = Some(candidate);
+    persist_task(&paths, &task).unwrap();
+    let state = AppState {
+        paths: paths.clone(),
+        runtime: Arc::new(TaskRuntime::default()),
+    };
+    assert!(state.runtime.register(&task.id));
+    assert!(revalidate_task(&state, &task.id)
+        .unwrap_err()
+        .to_string()
+        .contains("still running"));
+    assert!(state.runtime.is_running(&task.id));
+    state.runtime.unregister(&task.id);
+    let mut result = revalidate_task(&state, &task.id).unwrap();
+    assert!(matches!(result.status, TaskStatus::Completed));
+    assert!(report_is_usable(result.validation_report.as_ref().unwrap()));
+    assert_eq!(
+        result
+            .source_candidate
+            .as_ref()
+            .unwrap()
+            .book_source
+            .enabled_explore,
+        Some(false)
+    );
+    assert!(paths
+        .task_path(&task.id, "output/book-source.json")
+        .is_file());
+    assert!(!state.runtime.is_running(&task.id));
+    result
+        .source_candidate
+        .as_mut()
+        .unwrap()
+        .book_source
+        .rule_content
+        .as_mut()
+        .unwrap()
+        .content = Some(".missing-content@text".into());
+    persist_task(&paths, &result).unwrap();
+    let failed = revalidate_task(&state, &task.id).unwrap();
+    assert!(matches!(failed.status, TaskStatus::Failed));
+    assert!(failed.error_summary.is_some());
+    assert!(!failed.validation_report.unwrap().content.passed);
+    assert_eq!(
+        fs::read(paths.task_path(&task.id, "dom/content.html")).unwrap(),
+        original
+    );
+    assert!(get_task(&paths, &task.id)
+        .unwrap()
+        .validation_report
+        .is_some());
+    fs::remove_dir_all(paths.data_dir).unwrap();
+}
+
+#[test]
+fn model_prompts_include_sampled_dom_json_and_object_contract() {
+    let paths = diagnostic_test_paths();
+    let task_id = "evidence";
+    paths.ensure_task_layout(task_id).unwrap();
+    let mut sampled = SamplingResult {
+        site_label: "Evidence".into(),
+        base_url: "https://evidence.example".into(),
+        ..Default::default()
+    };
+    for role in ["explore", "book", "toc", "content"] {
+        let html_path = format!("dom/{role}.html");
+        fs::write(
+            paths.task_path(task_id, &html_path),
+            format!(
+                "<html><head><title>{role} 标题</title><script>{}</script></head><body><main class=\"actual-{role}\"><a href=\"/observed-book\">真实链接</a></main></body></html>",
+                "ignore-script".repeat(2000)
+            ),
+        )
+        .unwrap();
+        sampled.pages.push(crate::domain::PageSample {
+            role: role.into(),
+            url: format!("https://evidence.example/{role}"),
+            html_path,
+            ..Default::default()
+        });
+    }
+    fs::write(
+        paths.task_path(task_id, "network/search.json"),
+        r#"{"books":[{"name":"JSON 书籍","url":"/observed-book"}]}"#,
+    )
+    .unwrap();
+    sampled.network_samples.push(crate::domain::NetworkSample {
+        method: "GET".into(),
+        request_url: "https://evidence.example/api".into(),
+        response_path: "network/search.json".into(),
+        ..Default::default()
+    });
+    let generation = build_prompt(&paths, task_id, &sampled).unwrap();
+    let repair = build_repair_prompt(
+        &paths,
+        task_id,
+        &sampled,
+        &good_candidate(),
+        "bookInfo: author missing; toc: chapterList missing",
+    )
+    .unwrap();
+    for prompt in [&generation, &repair] {
+        for role in ["explore", "book", "toc", "content"] {
+            assert!(prompt.contains(&format!("actual-{role}")));
+            assert!(prompt.contains(&format!("dom/{role}.html")));
+        }
+        assert!(prompt.contains("JSON 书籍"));
+        assert!(prompt.contains("network/search.json"));
+        assert!(prompt.contains("JSON objects or null"));
+        assert!(prompt.contains("\"ruleBookInfo\": {"));
+        assert!(prompt.contains("{{key}}"));
+        assert!(!prompt.contains("ignore-script"));
+    }
+    assert!(repair.contains("bookInfo: author missing; toc: chapterList missing"));
+    fs::remove_dir_all(&paths.data_dir).unwrap();
+}
+
+#[test]
+fn repair_merge_replaces_existing_rules_and_keeps_omitted_fields() {
+    let mut current = good_candidate();
+    current.book_source.book_source_group = Some("用户分组".into());
+    let repaired = SourceCandidate {
+        strategy: "repair".into(),
+        book_source: BookSource {
+            book_source_name: "模型默认名称".into(),
+            book_source_url: "https://different.example".into(),
+            search_url: Some("https://fixture.novel.world/find?q={{key}}".into()),
+            rule_search: Some(SearchRule {
+                book_list: Some(".correct-results".into()),
+                author: Some(" ".into()),
+                ..Default::default()
+            }),
+            rule_book_info: Some(BookInfoRule {
+                name: Some("h1.correct-title@text".into()),
+                ..Default::default()
+            }),
+            rule_toc: Some(TocRule {
+                chapter_list: Some("#correct-chapters li".into()),
+                ..Default::default()
+            }),
+            rule_content: Some(ContentRule {
+                content: Some("article@textNodes".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let conservative = merge_candidates(current.clone(), repaired.clone());
+    assert_eq!(
+        conservative
+            .book_source
+            .rule_search
+            .unwrap()
+            .book_list
+            .as_deref(),
+        Some(".book-item")
+    );
+    let merged = merge_repair_candidates(current, repaired).book_source;
+    assert_eq!(merged.book_source_name, "Fixture");
+    assert_eq!(merged.book_source_url, "https://fixture.novel.world");
+    assert_eq!(merged.book_source_group.as_deref(), Some("用户分组"));
+    assert_eq!(
+        merged.search_url.as_deref(),
+        Some("https://fixture.novel.world/find?q={{key}}")
+    );
+    let search = merged.rule_search.unwrap();
+    assert_eq!(search.book_list.as_deref(), Some(".correct-results"));
+    assert_eq!(search.author.as_deref(), Some(".author@text"));
+    assert_eq!(
+        merged.rule_book_info.unwrap().name.as_deref(),
+        Some("h1.correct-title@text")
+    );
+    assert_eq!(
+        merged.rule_toc.unwrap().chapter_list.as_deref(),
+        Some("#correct-chapters li")
+    );
+    let content = merged.rule_content.unwrap();
+    assert_eq!(content.content.as_deref(), Some("article@textNodes"));
+    assert_eq!(
+        content.replace_regex.as_deref(),
+        Some("Sponsored by AI Source Designer##")
+    );
+}
+
+#[test]
+fn task_log_flush_preserves_model_diagnostics_without_duplicate_events() {
+    let paths = diagnostic_test_paths();
+    let mut task = TaskRecord::new(crate::domain::TaskDraft {
+        target_url: "https://evidence.example".into(),
+        test_keyword: None,
+        task_mode: TaskMode::Agent,
+    });
+    paths.ensure_task_layout(&task.id).unwrap();
+    append_log(&mut task, TaskStatus::Draft, "开始");
+    write_logs(&paths, &task).unwrap();
+    log_to_task_file(
+        &paths,
+        &task.id,
+        "model-request retained\nmodel-response retained\n",
+    )
+    .unwrap();
+    append_log(&mut task, TaskStatus::Validating, "验证结果：\n第二行");
+    write_logs(&paths, &task).unwrap();
+    write_logs(&paths, &task).unwrap();
+    let log = fs::read_to_string(paths.task_path(&task.id, "logs/task.log")).unwrap();
+    assert!(log.contains("model-request retained\nmodel-response retained"));
+    assert_eq!(log.matches("开始").count(), 1);
+    assert_eq!(log.matches("验证结果：\n第二行").count(), 1);
+    fs::remove_dir_all(&paths.data_dir).unwrap();
+}
+
+#[test]
+fn model_exchange_logs_preserve_response_and_redact_api_key() {
+    let paths = diagnostic_test_paths();
+    let secret = "test-api-key-private";
+    for status in [200, 520] {
+        let body = if status == 200 {
+            json!({"choices":[{"message":{"content":format!("model reply {secret}")}}]}).to_string()
+        } else {
+            json!({"error":format!("upstream failed {secret}")}).to_string()
+        };
+        let (base_url, server) = mock_model_server(status, body);
+        let task_id = format!("http-{status}");
+        let result = tauri::async_runtime::block_on(request_model_message(
+            &paths,
+            &task_id,
+            "test",
+            &StartAiSettings {
+                base_url,
+                model: "test-model".into(),
+            },
+            secret,
+            "test system",
+            &format!("test user {secret}"),
+        ));
+        server.join().unwrap();
+        if status == 200 {
+            assert_eq!(result.unwrap(), format!("model reply {secret}"));
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("HTTP 520"));
+            assert!(!error.contains(secret));
+        }
+        let log = fs::read_to_string(paths.task_path(&task_id, "logs/task.log")).unwrap();
+        assert!(log.contains("model-request-payload"));
+        assert!(log.contains("model-response"));
+        assert!(log.contains(&format!("status={status}")));
+        assert!(log.contains("[REDACTED]"));
+        assert!(!log.contains(secret));
+    }
+    fs::remove_dir_all(&paths.data_dir).unwrap();
+}
+
+#[test]
+fn failed_model_repair_still_runs_sampled_fallback_and_keeps_validation_logs() {
+    let paths = diagnostic_test_paths();
+    init_database(&paths).unwrap();
+    let mut task = create_task(
+        &paths,
+        crate::domain::TaskDraft {
+            target_url: "https://fixture.novel.world".into(),
+            test_keyword: Some("星门".into()),
+            task_mode: TaskMode::Classic,
+        },
+    )
+    .unwrap();
+    let fixture = paths.fixtures_dir.join("novel-world");
+    let manifest: Value =
+        serde_json::from_str(&fs::read_to_string(fixture.join("manifest.json")).unwrap()).unwrap();
+    let mut artifacts = ArtifactManifest::default();
+    let mut captures = String::new();
+    for page in manifest["pages"].as_array().unwrap() {
+        let role = page["role"].as_str().unwrap();
+        let relative = format!("dom/{role}.html");
+        fs::copy(
+            fixture.join(page["htmlFile"].as_str().unwrap()),
+            paths.task_path(&task.id, &relative),
+        )
+        .unwrap();
+        artifacts.dom.push(relative);
+        captures.push_str(&format!(
+            "capture role={role} url={}\n",
+            page["url"].as_str().unwrap()
+        ));
+    }
+    fs::write(paths.task_path(&task.id, "logs/worker.log"), captures).unwrap();
+    artifacts.logs = vec!["logs/task.log".into(), "logs/worker.log".into()];
+    task.artifact_manifest = Some(artifacts);
+    let mut candidate = good_candidate();
+    candidate.book_source.rule_book_info.as_mut().unwrap().name = Some(".wrong-title@text".into());
+    task.source_candidate = Some(candidate);
+    persist_task(&paths, &task).unwrap();
+    let (base_url, server) = mock_model_server(520, "error code: 520".into());
+    let state = AppState {
+        paths: paths.clone(),
+        runtime: Arc::new(TaskRuntime::default()),
+    };
+    let result = tauri::async_runtime::block_on(run_task(
+        &state,
+        &task.id,
+        StartAiSettings {
+            base_url,
+            model: "test-model".into(),
+        },
+        Some("test-key".into()),
+    ))
+    .unwrap();
+    server.join().unwrap();
+    assert!(matches!(result.status, TaskStatus::Completed));
+    assert!(report_is_usable(result.validation_report.as_ref().unwrap()));
+    let log = fs::read_to_string(paths.task_path(&task.id, "logs/task.log")).unwrap();
+    assert!(log.contains("HTTP 520"));
+    assert!(log.contains("继续尝试本地采样证据修复"));
+    assert!(log.contains("验证结果"));
+    assert!(log.contains("model-request-payload"));
+    assert!(log.contains("model-response"));
+    fs::remove_dir_all(&paths.data_dir).unwrap();
+}
+
 #[test]
 fn apply_replace_regex_removes_fixture_ad_copy() {
     let cleaned = apply_replace_regex(
@@ -73,10 +638,528 @@ fn normalize_url_expands_relative_links() {
 }
 
 #[test]
-fn serialized_book_source_does_not_emit_doc_only_fields() {
+fn serialized_book_source_omits_unset_optional_fields() {
     let source = serde_json::to_value(good_candidate().book_source).unwrap();
     assert!(source.pointer("/ruleContent/title").is_none());
     assert!(source.pointer("/ruleToc/updateTime").is_none());
+}
+
+#[test]
+fn css_descendant_rules_survive_normalization_and_reader_export() {
+    let mut candidate = good_candidate();
+    let search = candidate.book_source.rule_search.as_mut().unwrap();
+    search.book_list = Some("main .item".into());
+    search.name = Some(" @css: h3 a@text ".into());
+    search.book_url = Some("@CSS: h3 a@attr[href]".into());
+    search.author = Some("@css::is(p.byline, p.writer)@text".into());
+    search.check_key_word = Some("h3 a".into());
+    let toc = candidate.book_source.rule_toc.as_mut().unwrap();
+    toc.chapter_list = Some("ul.catalog li".into());
+    toc.pre_update_js = Some("return response".into());
+    let content = candidate.book_source.rule_content.as_mut().unwrap();
+    content.content = Some("article p@textNodes".into());
+    content.replace_regex = Some("h3 a##replacement".into());
+    content.source_regex = Some("h3 a".into());
+
+    sanitize_candidate(&mut candidate).unwrap();
+    let exported = exportable_book_source_value(&candidate.book_source).unwrap();
+    assert_eq!(exported["ruleSearch"]["bookList"], "@css::is(main .item)");
+    assert_eq!(exported["ruleSearch"]["name"], "@css::is(h3 a)@text");
+    assert_eq!(exported["ruleSearch"]["bookUrl"], "@css::is(h3 a)@href");
+    assert_eq!(
+        exported["ruleSearch"]["author"],
+        "@css::is(p.byline, p.writer)@text"
+    );
+    assert_eq!(exported["ruleSearch"]["checkKeyWord"], "h3 a");
+    assert_eq!(
+        exported["ruleToc"]["chapterList"],
+        "@css::is(ul.catalog li)"
+    );
+    assert_eq!(exported["ruleToc"]["preUpdateJs"], "return response");
+    assert_eq!(
+        exported["ruleContent"]["content"],
+        "@css::is(article p)@textNodes"
+    );
+    assert_eq!(exported["ruleContent"]["replaceRegex"], "h3 a##replacement");
+    assert_eq!(exported["ruleContent"]["sourceRegex"], "h3 a");
+    for rule in [
+        "class.book item@text",
+        "id.books a@href",
+        "tag.div a@text",
+        "@json:$.books",
+        "//div/a/@href",
+        "@js:return response",
+    ] {
+        assert_eq!(rule_syntax::normalize_css_rule_for_reader(rule), rule);
+    }
+    assert_eq!(
+        rule_syntax::normalize_css_rule_for_reader(" @css: h3 a@text##prefix## "),
+        "@css::is(h3 a)@text##prefix##"
+    );
+
+    let document = Html::parse_document(
+        r#"<main><div class="item"><h3><a href="/one">One</a></h3></div></main>"#,
+    );
+    let item = document
+        .select(&selector(exported["ruleSearch"]["bookList"].as_str().unwrap()).unwrap())
+        .next()
+        .unwrap();
+    assert_eq!(
+        evaluate_on_element_safe(&item, exported["ruleSearch"]["name"].as_str().unwrap()).unwrap(),
+        "One"
+    );
+    assert_eq!(
+        evaluate_on_element_safe(&item, exported["ruleSearch"]["bookUrl"].as_str().unwrap())
+            .unwrap(),
+        "/one"
+    );
+}
+
+#[test]
+fn list_field_rules_cannot_escape_the_item_scope() {
+    let document = Html::parse_document(
+        r#"<section class="catalog"><div class="item"><h3><a href="/one">One</a></h3></div><div class="item"><h3><a href="/two">Two</a></h3></div></section>"#,
+    );
+    let item = document.select(&selector(".item").unwrap()).next().unwrap();
+    assert_eq!(
+        evaluate_on_element_safe(&item, "h3 a@href").unwrap(),
+        "/one"
+    );
+    assert_eq!(
+        evaluate_on_element_safe(&item, "@css::is(h3 a)@href").unwrap(),
+        "/one"
+    );
+    assert_eq!(
+        document
+            .select(&selector("@css::is(div.item h3 a)").unwrap())
+            .count(),
+        2
+    );
+    assert_eq!(
+        evaluate_on_element_safe(&item, ".item h3 a@href").unwrap(),
+        ""
+    );
+    assert_eq!(
+        evaluate_on_element_safe(&item, ".catalog a@href").unwrap(),
+        ""
+    );
+    assert_eq!(
+        evaluate_on_element_safe(&item, "h3 a, a@href").unwrap(),
+        "/one"
+    );
+    assert_eq!(evaluate_on_element_safe(&item, "@text").unwrap(), "One");
+    let anchor = item.select(&selector("a").unwrap()).next().unwrap();
+    assert_eq!(evaluate_on_element_safe(&anchor, "@href").unwrap(), "/one");
+    let table = Html::parse_document(
+        r#"<table><tbody><tr class="item"><td><a href="/cell">Cell</a></td></tr></tbody></table>"#,
+    );
+    let row = table.select(&selector("tr").unwrap()).next().unwrap();
+    assert_eq!(
+        evaluate_on_element_safe(&row, "td a@href").unwrap(),
+        "/cell"
+    );
+    let nested = Html::parse_document(
+        r#"<div class="item"><div class="item"><h3><a href="/nested">Nested</a></h3></div></div>"#,
+    );
+    let outer = nested.select(&selector(".item").unwrap()).next().unwrap();
+    assert_eq!(
+        evaluate_on_element_safe(&outer, ".item h3 a@href").unwrap(),
+        "/nested"
+    );
+}
+
+#[test]
+fn url_templates_are_not_exported_as_book_url_patterns() {
+    for pattern in [
+        "https://books.test/{{id}}",
+        "https://books.test/${id}",
+        "[invalid",
+    ] {
+        let mut candidate = good_candidate();
+        candidate.book_source.book_url_pattern = Some(pattern.into());
+        let exported = exportable_book_source_value(&candidate.book_source).unwrap();
+        assert!(exported["bookUrlPattern"].is_null(), "{pattern}");
+        sanitize_candidate(&mut candidate).unwrap();
+        assert!(
+            candidate.book_source.book_url_pattern.is_none(),
+            "{pattern}"
+        );
+    }
+    let mut candidate = good_candidate();
+    candidate.book_source.book_url_pattern = Some(r"https://books\.test/book/\d{1,6}$".into());
+    sanitize_candidate(&mut candidate).unwrap();
+    assert_eq!(
+        candidate.book_source.book_url_pattern.as_deref(),
+        Some(r"https://books\.test/book/\d{1,6}$")
+    );
+}
+
+#[test]
+fn explore_validation_checks_every_list_item_and_its_scope() {
+    let paths = diagnostic_test_paths();
+    let task_id = "explore-scope";
+    paths.ensure_task_layout(task_id).unwrap();
+    let page_path = paths.task_path(task_id, "dom/explore.html");
+    let sampled = SamplingResult {
+        pages: vec![crate::domain::PageSample {
+            role: "explore".into(),
+            url: "https://books.test/catalog".into(),
+            html_path: "dom/explore.html".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut candidate = good_candidate();
+    candidate.book_source.explore_url = Some("All::https://books.test/catalog".into());
+    candidate.book_source.rule_explore = Some(ExploreRule {
+        book_list: Some(".item".into()),
+        name: Some("h3 a@text".into()),
+        book_url: Some("h3 a@href".into()),
+        ..Default::default()
+    });
+    fs::write(&page_path, r#"<div class="item"><h3><a href="/one">One</a></h3></div><div class="item"><h3><a>Two</a></h3></div>"#).unwrap();
+    let report = validate_candidate(&paths, task_id, &sampled, &candidate, None).unwrap();
+    assert!(!report.explore.passed);
+    assert!(report.explore.details[0].contains("第 2 条"));
+    fs::write(&page_path, r#"<div class="item"><h3><a href="/one">One</a></h3></div><div class="item"><h3><a href="/two">Two</a></h3></div>"#).unwrap();
+    assert!(
+        validate_candidate(&paths, task_id, &sampled, &candidate, None)
+            .unwrap()
+            .explore
+            .passed
+    );
+    candidate
+        .book_source
+        .rule_explore
+        .as_mut()
+        .unwrap()
+        .book_url = Some(".item h3 a@href".into());
+    assert!(
+        !validate_candidate(&paths, task_id, &sampled, &candidate, None)
+            .unwrap()
+            .explore
+            .passed
+    );
+    fs::remove_dir_all(paths.data_dir).unwrap();
+}
+
+#[test]
+fn explore_pagination_templates_follow_observed_urls() {
+    for (first, next, third) in [
+        (
+            "https://books.test/catalog",
+            "https://books.test/catalog/2",
+            "https://books.test/catalog/3",
+        ),
+        (
+            "https://books.test/list?category=fantasy&page=1",
+            "https://books.test/list?category=fantasy&page=2",
+            "https://books.test/list?category=fantasy&page=3",
+        ),
+        (
+            "https://books.test/catalogue/index.html",
+            "https://books.test/catalogue/page-2.html",
+            "https://books.test/catalogue/page-3.html",
+        ),
+        (
+            "http://[::1]/catalog",
+            "http://[::1]/catalog/2",
+            "http://[::1]/catalog/3",
+        ),
+    ] {
+        let template = explore::pagination_template(first, next).unwrap();
+        assert_eq!(
+            explore::page_url(&template, first, 1).as_deref(),
+            Some(first)
+        );
+        assert_eq!(
+            explore::page_url(&template, first, 2).as_deref(),
+            Some(next)
+        );
+        assert_eq!(
+            explore::page_url(&template, first, 3).as_deref(),
+            Some(third)
+        );
+    }
+    for (first, next) in [
+        (
+            "https://books.test/catalog",
+            "https://books.test/catalog/20",
+        ),
+        (
+            "https://books.test/list?page=10",
+            "https://books.test/list?page=20",
+        ),
+        (
+            "https://books.test/catalog",
+            "https://external.test/catalog/2",
+        ),
+        ("https://books.test/catalog", "https://books.test/unrelated"),
+        (
+            "https://books.test/catalog",
+            "https://books.test/catalog%2Fnext",
+        ),
+    ] {
+        assert!(
+            explore::pagination_template(first, next).is_none(),
+            "{next}"
+        );
+    }
+    let first = "https://books.test/list?category=fantasy&page=1";
+    assert_eq!(
+        explore::urls("http://[::1]/catalog"),
+        vec!["http://[::1]/catalog"]
+    );
+    let template =
+        explore::pagination_template(first, "https://books.test/list?category=fantasy&page=2")
+            .unwrap();
+    let sibling = explore::category_template(
+        first,
+        &template,
+        "https://books.test/list?category=scifi&page=1",
+    )
+    .unwrap();
+    assert_eq!(
+        explore::page_url(&sibling, first, 3).as_deref(),
+        Some("https://books.test/list?category=scifi&page=3")
+    );
+    let first = "https://books.test/catalogue/index.html";
+    let template =
+        explore::pagination_template(first, "https://books.test/catalogue/page-2.html").unwrap();
+    let sibling =
+        explore::category_template(first, &template, "https://books.test/fiction/index.html")
+            .unwrap();
+    assert_eq!(
+        explore::page_url(&sibling, first, 3).as_deref(),
+        Some("https://books.test/fiction/page-3.html")
+    );
+    assert!(explore::category_template(
+        first,
+        &template,
+        "https://external.test/fiction/index.html"
+    )
+    .is_none());
+    assert!(explore::category_template(
+        first,
+        &template,
+        "https://books.test/other/depth/index.html"
+    )
+    .is_none());
+}
+
+#[test]
+fn explore_pagination_preserves_groups_styles_and_existing_templates() {
+    let paths = diagnostic_test_paths();
+    let task_id = "explore-template";
+    paths.ensure_task_layout(task_id).unwrap();
+    fs::write(
+        paths.task_path(task_id, "dom/explore.html"),
+        r#"<a href="/catalog/2" rel="next">More</a>"#,
+    )
+    .unwrap();
+    let sampled = SamplingResult {
+        pages: vec![crate::domain::PageSample {
+            role: "explore".into(),
+            url: "https://books.test/catalog".into(),
+            html_path: "dom/explore.html".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let original = json!([
+        {"title":"Categories", "url":"", "style":{"layout_flexGrow":1, "layout_flexBasisPercent":1}},
+        {"title":"All", "url":"/catalog", "style":{"layout_flexBasisPercent":0.2}},
+        {"title":"Fiction", "url":"/fiction"},
+        {"title":"Custom", "url":"/custom{{page == 1 ? '' : '/' + page}}"},
+        {"title":"Different structure", "url":"/other/list"}
+    ]);
+    let mut source = good_candidate().book_source;
+    source.book_source_url = "https://books.test".into();
+    source.explore_url = Some(original.to_string());
+    explore::complete_pagination(&paths, task_id, &sampled, &mut source).unwrap();
+    let updated: Value = serde_json::from_str(source.explore_url.as_ref().unwrap()).unwrap();
+    assert_eq!(updated[0], original[0]);
+    assert_eq!(updated[1]["style"], original[1]["style"]);
+    assert_eq!(updated[3], original[3]);
+    assert_eq!(updated[4], original[4]);
+    for (index, expected) in [
+        (1, "https://books.test/catalog/2"),
+        (2, "https://books.test/fiction/2"),
+    ] {
+        assert_eq!(
+            explore::page_url(
+                updated[index]["url"].as_str().unwrap(),
+                &source.book_source_url,
+                2
+            )
+            .as_deref(),
+            Some(expected)
+        );
+    }
+    source.explore_url = Some("All::/catalog".into());
+    explore::complete_pagination(&paths, task_id, &sampled, &mut source).unwrap();
+    assert_eq!(
+        explore::page_url(
+            &explore::urls(source.explore_url.as_ref().unwrap())[0],
+            &source.book_source_url,
+            2
+        )
+        .as_deref(),
+        Some("https://books.test/catalog/2")
+    );
+    let document = Html::parse_document(
+        r#"<a href="https://external.test/catalog/2" rel="next">Next</a><a href="/catalog#top">下一页</a><a href="/catalog/2">下一页</a>"#,
+    );
+    assert_eq!(
+        explore::next_page_url("https://books.test/catalog", &document).as_deref(),
+        Some("https://books.test/catalog/2")
+    );
+    fs::remove_dir_all(paths.data_dir).unwrap();
+}
+
+#[test]
+fn explore_validation_requires_real_new_books_on_the_next_page() {
+    let paths = diagnostic_test_paths();
+    let task_id = "explore-pagination";
+    paths.ensure_task_layout(task_id).unwrap();
+    let first_html = r#"<div class="item"><h3><a href="/one">One</a></h3></div><a href="/catalog/2" rel="next">Next</a>"#;
+    fs::write(paths.task_path(task_id, "dom/explore.html"), first_html).unwrap();
+    let mut sampled = SamplingResult {
+        pages: vec![crate::domain::PageSample {
+            role: "explore".into(),
+            url: "https://books.test/catalog".into(),
+            html_path: "dom/explore.html".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut candidate = good_candidate();
+    candidate.book_source.book_source_url = "https://books.test".into();
+    candidate.book_source.explore_url = Some("All::/catalog".into());
+    candidate.book_source.rule_explore = Some(ExploreRule {
+        book_list: Some(".item".into()),
+        name: Some("h3 a@text".into()),
+        book_url: Some("h3 a@href".into()),
+        ..Default::default()
+    });
+    let validate = |sampled: &SamplingResult, candidate: &SourceCandidate| {
+        validate_candidate(&paths, task_id, sampled, candidate, None)
+            .unwrap()
+            .explore
+    };
+    assert!(validate(&sampled, &candidate).summary.contains("分页 URL"));
+    explore::complete_pagination(&paths, task_id, &sampled, &mut candidate.book_source).unwrap();
+    assert!(validate(&sampled, &candidate)
+        .summary
+        .contains("尚未实际验证"));
+    sampled.pages.push(crate::domain::PageSample {
+        role: "explore-next".into(),
+        url: "https://books.test/catalog/2".into(),
+        html_path: "dom/explore-next.html".into(),
+        ..Default::default()
+    });
+    fs::write(
+        paths.task_path(task_id, "dom/explore-next.html"),
+        first_html,
+    )
+    .unwrap();
+    assert!(validate(&sampled, &candidate).summary.contains("重复首页"));
+    fs::write(
+        paths.task_path(task_id, "dom/explore-next.html"),
+        "<p>No books</p>",
+    )
+    .unwrap();
+    assert!(!validate(&sampled, &candidate).passed);
+    fs::write(
+        paths.task_path(task_id, "dom/explore-next.html"),
+        r#"<div class="item"><h3><a href="https://external.test/two">Two</a></h3></div>"#,
+    )
+    .unwrap();
+    assert!(validate(&sampled, &candidate).summary.contains("站内链接"));
+    fs::write(
+        paths.task_path(task_id, "dom/explore-next.html"),
+        r#"<div class="item"><h3><a href="/two">Two</a></h3></div>"#,
+    )
+    .unwrap();
+    assert!(validate(&sampled, &candidate).passed);
+    fs::write(
+        paths.task_path(task_id, "dom/explore-next.html"),
+        r#"<div class="item"><h3><a href="/two">Two</a></h3></div><a href="/catalog/4" rel="next">Next</a>"#,
+    )
+    .unwrap();
+    assert!(validate(&sampled, &candidate)
+        .summary
+        .contains("第 3 页地址"));
+    fs::write(
+        paths.task_path(task_id, "dom/explore-next.html"),
+        r#"<div class="item"><h3><a href="/two">Two</a></h3></div><a href="/catalog/3" rel="next">Next</a>"#,
+    )
+    .unwrap();
+    assert!(validate(&sampled, &candidate).passed);
+    sampled.pages[1].url = "https://books.test/catalog/3".into();
+    assert!(validate(&sampled, &candidate).summary.contains("地址不符"));
+    sampled.pages.clear();
+    assert!(!validate(&sampled, &candidate).passed);
+    fs::remove_dir_all(paths.data_dir).unwrap();
+}
+
+#[test]
+fn inferred_explore_categories_use_navigation_and_pagination_evidence() {
+    let paths = diagnostic_test_paths();
+    let task_id = "explore-inference";
+    paths.ensure_task_layout(task_id).unwrap();
+    fs::write(paths.task_path(task_id, "dom/explore.html"), r#"<nav><a href="/catalog">完结</a><a href="/fiction">玄幻</a><a href="https://external.test/other">奇幻</a></nav><div class="item"><h3><a href="/one">都市小说书名</a></h3></div><a href="/catalog/2" rel="next">Next</a>"#).unwrap();
+    let sampled = SamplingResult {
+        base_url: "https://books.test".into(),
+        pages: vec![crate::domain::PageSample {
+            role: "explore".into(),
+            url: "https://books.test/catalog".into(),
+            html_path: "dom/explore.html".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let candidate = infer_candidate_from_sampled(&paths, task_id, &sampled).unwrap();
+    let entries: Value =
+        serde_json::from_str(candidate.book_source.explore_url.as_ref().unwrap()).unwrap();
+    assert_eq!(entries.as_array().unwrap().len(), 2);
+    assert_eq!(entries[0]["title"], "完结");
+    assert_eq!(
+        explore::page_url(entries[1]["url"].as_str().unwrap(), &sampled.base_url, 2).as_deref(),
+        Some("https://books.test/fiction/2")
+    );
+    fs::remove_dir_all(paths.data_dir).unwrap();
+}
+
+#[test]
+fn current_reader_optional_rule_fields_are_preserved() {
+    let mut candidate = good_candidate();
+    candidate.book_source.rule_content.as_mut().unwrap().title = Some("h1@text".into());
+    candidate.book_source.rule_toc.as_mut().unwrap().update_time = Some(".date@text".into());
+    sanitize_candidate(&mut candidate).unwrap();
+    let exported = exportable_book_source_value(&candidate.book_source).unwrap();
+    assert_eq!(
+        exported
+            .pointer("/ruleContent/title")
+            .and_then(Value::as_str),
+        Some("h1@text")
+    );
+    assert_eq!(
+        exported
+            .pointer("/ruleToc/updateTime")
+            .and_then(Value::as_str),
+        Some(".date@text")
+    );
+    let paths = diagnostic_test_paths();
+    assert!(validate_candidate(
+        &paths,
+        "optional-fields",
+        &SamplingResult::default(),
+        &candidate,
+        None
+    )
+    .is_ok());
+    fs::remove_dir_all(paths.data_dir).unwrap();
 }
 
 #[test]
@@ -741,12 +1824,14 @@ fn inferred_rules_handle_biquge_style_templates() {
     );
 
     let report = validate_candidate(&paths, task_id, &sampled, &candidate, Some("剑来")).unwrap();
-    assert!(report.explore.passed);
+    assert!(!report.explore.passed);
     assert!(report.search.passed);
     assert!(report.book_info.passed);
     assert!(report.toc.passed);
     assert!(report.content.passed);
     assert!(report.cleanup.passed);
+    assert!(report_is_usable(&report));
+    assert!(!report_requires_repair(&report, &candidate.book_source));
 
     let _ = fs::remove_dir_all(root);
 }
@@ -1615,7 +2700,7 @@ fn delete_task_succeeds_when_only_task_directory_remains() {
 
 #[test]
 fn report_is_usable_when_only_one_discovery_path_passes() {
-    let report = ValidationReport {
+    let mut report = ValidationReport {
         explore: passed_phase("explore ok".into(), vec![], vec![]),
         search: failed_phase("search missing", vec![], vec![]),
         book_info: passed_phase("book ok".into(), vec![], vec![]),
@@ -1625,6 +2710,451 @@ fn report_is_usable_when_only_one_discovery_path_passes() {
     };
 
     assert!(report_is_usable(&report));
+    let mut source = good_candidate().book_source;
+    assert!(!report_requires_repair(&report, &source));
+    report.explore = failed_phase("pagination failed", vec![], vec![]);
+    report.search = passed_phase("search ok".into(), vec![], vec![]);
+    source.explore_url = Some("All::https://books.test/catalog".into());
+    assert!(report_is_usable(&report));
+    assert!(report_requires_repair(&report, &source));
+    source.enabled_explore = Some(false);
+    assert!(!report_requires_repair(&report, &source));
+    report.search = failed_phase("search failed", vec![], vec![]);
+    assert!(!report_is_usable(&report));
+    assert!(report_requires_repair(&report, &source));
+}
+
+#[test]
+fn site_scope_accepts_related_hosts_and_rejects_foreign_destinations() {
+    let target = "https://www.books.example/";
+    for url in [
+        "https://www.books.example/novel",
+        "https://books.example/novel",
+        "https://m.books.example/novel",
+        "http://books.example/novel",
+    ] {
+        assert!(is_site_url(target, url), "{url}");
+    }
+    for url in [
+        "https://search.example/",
+        "https://books.example.evil.test/",
+        "https://notbooks.example/",
+        "https://books.example@search.example/",
+        "javascript:history.back()",
+    ] {
+        assert!(!is_site_url(target, url), "{url}");
+    }
+    assert!(is_site_url(
+        "http://127.0.0.1:8123/",
+        "http://127.0.0.1:8123/book"
+    ));
+    assert!(!is_site_url(
+        "http://127.0.0.1:8123/",
+        "http://127.0.0.1:8124/book"
+    ));
+    assert!(!is_site_url(
+        "http://127.0.0.1:8123/",
+        "http://127.0.0.2:8123/book"
+    ));
+}
+
+#[test]
+fn rejects_foreign_observed_links_for_reading_roles() {
+    let target = "https://books.example/";
+    let inspections = vec![PageInspection {
+        page: crate::domain::PageSample {
+            url: target.into(),
+            ..Default::default()
+        },
+        links: vec![crate::domain::PageLink {
+            label: "图片".into(),
+            url: "https://search.example/images".into(),
+        }],
+        ..Default::default()
+    }];
+    let observed = build_observed_action_inputs(&inspections);
+    for role in ["search", "explore", "book", "toc", "content"] {
+        let action = AgentAction {
+            kind: "open".into(),
+            url: "https://search.example/images".into(),
+            role: role.into(),
+            reason: None,
+            form_action: None,
+            form_method: None,
+            query_param: None,
+            wait_for_selector: None,
+        };
+        assert!(validate_agent_action(&action, &observed, target)
+            .unwrap()
+            .contains("outside the target site"));
+    }
+}
+
+#[test]
+fn search_requires_an_explicit_observed_internal_form() {
+    let target = "https://books.example/";
+    let inspections = vec![PageInspection {
+        page: crate::domain::PageSample {
+            url: target.into(),
+            ..Default::default()
+        },
+        forms: vec![
+            crate::domain::PageForm {
+                action: "https://search.example/search".into(),
+                method: "get".into(),
+                input_names: vec!["q".into()],
+            },
+            crate::domain::PageForm {
+                action: "https://books.example/search".into(),
+                method: "get".into(),
+                input_names: vec!["q".into()],
+            },
+        ],
+        ..Default::default()
+    }];
+    let observed = build_observed_action_inputs(&inspections);
+    let mut action = AgentAction {
+        kind: "search".into(),
+        url: target.into(),
+        role: "search".into(),
+        reason: None,
+        form_action: Some("https://search.example/search".into()),
+        form_method: Some("get".into()),
+        query_param: Some("q".into()),
+        wait_for_selector: None,
+    };
+    assert!(validate_agent_action(&action, &observed, target)
+        .unwrap()
+        .contains("outside the target site"));
+    action.form_action = None;
+    assert!(validate_agent_action(&action, &observed, target)
+        .unwrap()
+        .contains("requires an observed formAction"));
+    action.form_action = Some("https://books.example/search".into());
+    assert_eq!(validate_agent_action(&action, &observed, target), None);
+    action.query_param = Some("guessed".into());
+    assert!(validate_agent_action(&action, &observed, target).is_some());
+}
+
+#[test]
+fn cached_foreign_pages_do_not_complete_coverage_but_keep_artifacts() {
+    let paths = diagnostic_test_paths();
+    let task = TaskRecord::new(crate::domain::TaskDraft {
+        target_url: "https://books.example/".into(),
+        test_keyword: None,
+        task_mode: TaskMode::Agent,
+    });
+    paths.ensure_task_layout(&task.id).unwrap();
+    let mut worker_log = String::new();
+    for role in ["landing", "explore", "search", "book", "toc", "content"] {
+        fs::write(
+            paths.task_path(&task.id, &format!("dom/{role}.html")),
+            "<html><body>snapshot</body></html>",
+        )
+        .unwrap();
+        fs::write(
+            paths.task_path(&task.id, &format!("screenshots/{role}.png")),
+            [],
+        )
+        .unwrap();
+        let url = if matches!(role, "landing" | "explore") {
+            "https://books.example/"
+        } else {
+            "https://search.example/"
+        };
+        worker_log.push_str(&format!("capture role={role} url={url}\n"));
+    }
+    fs::write(paths.task_path(&task.id, "network/external.json"), "{}").unwrap();
+    worker_log
+        .push_str("network-sample label=external method=GET url=https://search.example/api\n");
+    fs::write(paths.task_path(&task.id, "logs/worker.log"), worker_log).unwrap();
+    let sampled = load_sampled_from_task(&paths, &task).unwrap().unwrap();
+    assert_eq!(sampled.pages.len(), 2);
+    assert!(!agent_has_minimum_coverage(&sampled.pages));
+    assert!(sampled.network_samples.is_empty());
+    assert_eq!(sampled.manifest.dom.len(), 6);
+    assert_eq!(sampled.manifest.screenshots.len(), 6);
+    assert_eq!(sampled.manifest.network, vec!["network/external.json"]);
+    fs::remove_dir_all(&paths.data_dir).unwrap();
+}
+
+#[test]
+fn uncaptured_files_remain_diagnostic_evidence_without_assumed_urls() {
+    let paths = diagnostic_test_paths();
+    let task = TaskRecord::new(crate::domain::TaskDraft {
+        target_url: "https://books.example/".into(),
+        test_keyword: None,
+        task_mode: TaskMode::Agent,
+    });
+    paths.ensure_task_layout(&task.id).unwrap();
+    fs::write(
+        paths.task_path(&task.id, "dom/book.html"),
+        "<html><body>外站或未完成的页面</body></html>",
+    )
+    .unwrap();
+    fs::write(paths.task_path(&task.id, "network/unlogged.json"), "{}").unwrap();
+    let sampled = load_sampled_from_task(&paths, &task).unwrap().unwrap();
+    assert!(sampled.pages.is_empty());
+    assert!(sampled.network_samples.is_empty());
+    assert_eq!(sampled.manifest.dom, vec!["dom/book.html"]);
+    assert_eq!(sampled.manifest.network, vec!["network/unlogged.json"]);
+    fs::remove_dir_all(&paths.data_dir).unwrap();
+}
+
+#[test]
+fn navigation_links_do_not_become_reading_pages() {
+    let paths = diagnostic_test_paths();
+    let task_id = "navigation";
+    paths.ensure_task_layout(task_id).unwrap();
+    let inspection = PageInspection {
+        page: crate::domain::PageSample {
+            url: "https://books.example/".into(),
+            html_path: "dom/explore.html".into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let navigation = (0..120)
+        .map(|index| format!("<a href='/nav/{index}'>首页 图片 隐私</a>"))
+        .collect::<String>();
+    fs::write(paths.task_path(task_id, "dom/explore.html"), &navigation).unwrap();
+    assert_eq!(
+        infer_followup_book_url_from_dom(&paths, task_id, &inspection, Some("星门")),
+        None
+    );
+    assert_eq!(
+        infer_followup_toc_url_from_dom(&paths, task_id, &inspection),
+        None
+    );
+    assert_eq!(
+        infer_followup_content_url_from_dom(&paths, task_id, &inspection),
+        None
+    );
+
+    fs::write(
+        paths.task_path(task_id, "dom/explore.html"),
+        format!("{navigation}<h3><a href='/novels/42'>星门</a></h3>"),
+    )
+    .unwrap();
+    assert_eq!(
+        infer_followup_book_url_from_dom(&paths, task_id, &inspection, Some("星门")).as_deref(),
+        Some("https://books.example/novels/42")
+    );
+    fs::write(
+        paths.task_path(task_id, "dom/explore.html"),
+        format!("{navigation}<a href='/novels/42/list'>章节目录</a>"),
+    )
+    .unwrap();
+    assert_eq!(
+        infer_followup_toc_url_from_dom(&paths, task_id, &inspection).as_deref(),
+        Some("https://books.example/novels/42/list")
+    );
+    fs::write(
+        paths.task_path(task_id, "dom/explore.html"),
+        format!("{navigation}<a href='/novels/42/read/1'>第一章 初始</a>"),
+    )
+    .unwrap();
+    assert_eq!(
+        infer_followup_content_url_from_dom(&paths, task_id, &inspection).as_deref(),
+        Some("https://books.example/novels/42/read/1")
+    );
+    fs::remove_dir_all(&paths.data_dir).unwrap();
+}
+
+#[test]
+fn foreign_redirect_keeps_diagnostics_without_marking_role_sampled() {
+    let inspection = PageInspection {
+        page: crate::domain::PageSample {
+            role: "book".into(),
+            url: "https://search.example/".into(),
+            ..Default::default()
+        },
+        network_samples: vec![crate::domain::NetworkSample {
+            request_url: "https://search.example/api".into(),
+            response_path: "network/redirect.json".into(),
+            ..Default::default()
+        }],
+        manifest: ArtifactManifest {
+            screenshots: vec!["screenshots/book.png".into()],
+            network: vec!["network/redirect.json".into()],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (mut pages, mut network, mut manifest, mut inspections) = (
+        Vec::new(),
+        Vec::new(),
+        ArtifactManifest::default(),
+        Vec::new(),
+    );
+    assert!(!merge_inspection(
+        "https://books.example/",
+        &mut pages,
+        &mut network,
+        &mut manifest,
+        &mut inspections,
+        inspection
+    ));
+    assert!(pages.is_empty());
+    assert!(inspections.is_empty());
+    assert!(network.is_empty());
+    assert_eq!(manifest.screenshots, vec!["screenshots/book.png"]);
+    assert_eq!(manifest.network, vec!["network/redirect.json"]);
+}
+
+#[test]
+fn inline_chapter_list_is_toc_instead_of_a_chapter_title_containing_chapters() {
+    let paths = diagnostic_test_paths();
+    let task_id = "inline-toc";
+    paths.ensure_task_layout(task_id).unwrap();
+    let inspection = PageInspection {
+        page: crate::domain::PageSample {
+            role: "book".into(),
+            url: "https://books.example/42".into(),
+            html_path: "dom/book.html".into(),
+            ..Default::default()
+        },
+        links: vec![crate::domain::PageLink {
+            label: "年终总结（章节已更）".into(),
+            url: "https://books.example/42/note".into(),
+        }],
+        ..Default::default()
+    };
+    let html = "<h1>星门</h1><div id='list'><ul><li><a href='/42/note'>年终总结（章节已更）</a></li><li><a href='/42/1'>第一章</a></li><li><a href='/42/2'>第二章</a></li><li><a href='/42/3'>第三章</a></li></ul></div>";
+    fs::write(paths.task_path(task_id, "dom/book.html"), html).unwrap();
+    assert_eq!(infer_followup_toc_url(&inspection), None);
+    assert_eq!(
+        infer_followup_toc_url_from_dom(&paths, task_id, &inspection).as_deref(),
+        Some("https://books.example/42")
+    );
+    let sampled = SamplingResult {
+        pages: vec![inspection.page.clone()],
+        ..Default::default()
+    };
+    assert_eq!(
+        infer_toc_rule_from_sampled(&paths, task_id, &sampled)
+            .unwrap()
+            .chapter_list
+            .as_deref(),
+        Some("#list li")
+    );
+    fs::write(
+        paths.task_path(task_id, "dom/book.html"),
+        format!("{html}<a href='/toc/42'>查看全部章节</a>"),
+    )
+    .unwrap();
+    assert_eq!(
+        infer_followup_toc_url_from_dom(&paths, task_id, &inspection).as_deref(),
+        Some("https://books.example/toc/42")
+    );
+    fs::remove_dir_all(&paths.data_dir).unwrap();
+}
+
+#[test]
+fn repeated_captures_replace_the_url_for_the_same_artifact() {
+    let (mut pages, mut network, mut manifest, mut inspections) = (
+        Vec::new(),
+        Vec::new(),
+        ArtifactManifest::default(),
+        Vec::new(),
+    );
+    for url in [
+        "https://books.example/chapter/1",
+        "https://books.example/chapter/2",
+        "https://search.example/",
+    ] {
+        let inspection = PageInspection {
+            page: crate::domain::PageSample {
+                role: "content".into(),
+                url: url.into(),
+                html_path: "dom/content.html".into(),
+                ..Default::default()
+            },
+            network_samples: vec![crate::domain::NetworkSample {
+                request_url: url.into(),
+                response_path: "network/content-1.html".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let accepted = merge_inspection(
+            "https://books.example/",
+            &mut pages,
+            &mut network,
+            &mut manifest,
+            &mut inspections,
+            inspection,
+        );
+        if url.starts_with("https://books.example/") {
+            assert!(accepted);
+            assert_eq!(pages.len(), 1);
+            assert_eq!(pages[0].url, url);
+            assert_eq!(inspections.len(), 1);
+            assert_eq!(inspections[0].page.url, url);
+            assert_eq!(network.len(), 1);
+            assert_eq!(network[0].request_url, url);
+        } else {
+            assert!(!accepted);
+            assert!(pages.is_empty());
+            assert!(inspections.is_empty());
+            assert!(network.is_empty());
+        }
+    }
+}
+
+#[test]
+fn agent_planner_receives_dom_and_search_failure_context() {
+    let paths = diagnostic_test_paths();
+    let task_id = "plan-evidence";
+    paths.ensure_task_layout(task_id).unwrap();
+    fs::write(
+        paths.task_path(task_id, "dom/landing.html"),
+        "<html><body><h3><a href='/novels/42'>星门</a></h3></body></html>",
+    )
+    .unwrap();
+    fs::write(
+        paths.task_path(task_id, "logs/task.log"),
+        "站内搜索不可用，继续通过 explore 采样\n",
+    )
+    .unwrap();
+    let inspections = vec![PageInspection {
+        page: crate::domain::PageSample {
+            role: "landing".into(),
+            url: "https://books.example/".into(),
+            html_path: "dom/landing.html".into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }];
+    let body = json!({"choices":[{"message":{"content":"{\"completed\":false,\"actions\":[]}"}}]})
+        .to_string();
+    let (base_url, server) = mock_model_server(200, body);
+    let plan = tauri::async_runtime::block_on(request_agent_plan(
+        &paths,
+        task_id,
+        &StartAiSettings {
+            base_url,
+            model: "test-model".into(),
+        },
+        "test-key",
+        "https://books.example/",
+        Some("星门"),
+        &inspections,
+    ))
+    .unwrap();
+    assert!(!plan.completed);
+    let request = server.join().unwrap();
+    let body_start = request
+        .windows(4)
+        .position(|part| part == b"\r\n\r\n")
+        .unwrap()
+        + 4;
+    let payload: Value = serde_json::from_slice(&request[body_start..]).unwrap();
+    let prompt = payload["messages"][1]["content"].as_str().unwrap();
+    assert!(prompt.contains("<h3><a href=\"/novels/42\">星门</a></h3>"));
+    assert!(prompt.contains("站内搜索不可用，继续通过 explore 采样"));
+    assert!(prompt.contains("target site"));
+    fs::remove_dir_all(&paths.data_dir).unwrap();
 }
 
 #[test]
@@ -1665,7 +3195,7 @@ fn rejects_agent_search_action_with_unobserved_url() {
         wait_for_selector: None,
     };
 
-    assert!(validate_agent_action(&action, &observed).is_some());
+    assert!(validate_agent_action(&action, &observed, "https://m.cuoceng.com/").is_some());
 }
 
 #[test]
@@ -1703,7 +3233,7 @@ fn rejects_agent_action_with_javascript_scheme() {
     };
 
     assert_eq!(
-        validate_agent_action(&action, &observed),
+        validate_agent_action(&action, &observed, "https://m.22biqu.com/"),
         Some("action url must use http/https scheme".into())
     );
 }

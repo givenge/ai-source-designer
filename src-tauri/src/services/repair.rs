@@ -83,7 +83,7 @@ pub(super) async fn try_repair_candidate_with_model(
         return Ok(false);
     };
 
-    let prompt = build_repair_prompt(sampled, candidate, failure_summary)?;
+    let prompt = build_repair_prompt(paths, task_id, sampled, candidate, failure_summary)?;
     let content = request_model_message(
         paths,
         task_id,
@@ -105,7 +105,7 @@ pub(super) async fn try_repair_candidate_with_model(
         ]
     }))?;
     let repaired = parse_candidate_from_openai(paths, sampled, &body)?;
-    *candidate = merge_candidates(candidate.clone(), repaired);
+    *candidate = merge_repair_candidates(candidate.clone(), repaired);
     candidate.repair_history.push(RepairStep {
         label: "model repair".into(),
         reason: failure_summary.to_string(),

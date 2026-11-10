@@ -26,18 +26,26 @@ impl AppPaths {
         let data_dir = home_dir.join(".aisourcedesign");
         let tasks_dir = data_dir.join("tasks");
         let logs_dir = data_dir.join("logs");
-        let repo_root = normalize_runtime_path(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
-                .canonicalize()
-                .context("failed to resolve repository root")?,
+        let resource_dir = normalize_runtime_path(
+            app.path()
+                .resource_dir()
+                .context("failed to resolve resource dir")?,
         );
+        let source_root =
+            normalize_runtime_path(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".."));
+        let runtime_root = if cfg!(debug_assertions)
+            && source_root.join("playwright/worker/index.mjs").is_file()
+        {
+            source_root
+        } else {
+            resource_dir
+        };
 
         let paths = Self {
             db_path: data_dir.join("app.sqlite"),
             settings_path: data_dir.join("settings.json"),
-            fixtures_dir: repo_root.join("fixtures"),
-            worker_script: repo_root
+            fixtures_dir: runtime_root.join("fixtures"),
+            worker_script: runtime_root
                 .join("playwright")
                 .join("worker")
                 .join("index.mjs"),
@@ -98,6 +106,7 @@ pub struct AppState {
 #[derive(Debug, Default)]
 pub struct TaskRuntime {
     running: Mutex<HashSet<String>>,
+    runtime_repairing: Mutex<bool>,
     cancel_requested: Mutex<HashSet<String>>,
     delete_requested: Mutex<HashSet<String>>,
 }
@@ -105,7 +114,12 @@ pub struct TaskRuntime {
 impl TaskRuntime {
     pub fn register(&self, task_id: &str) -> bool {
         let mut running = self.running.lock().expect("task runtime poisoned");
-        if running.contains(task_id) {
+        if running.contains(task_id)
+            || *self
+                .runtime_repairing
+                .lock()
+                .expect("task runtime poisoned")
+        {
             return false;
         }
 
@@ -169,5 +183,50 @@ impl TaskRuntime {
             .lock()
             .expect("task runtime poisoned")
             .contains(task_id)
+    }
+
+    pub fn begin_runtime_repair(&self) -> bool {
+        let running = self.running.lock().expect("task runtime poisoned");
+        let mut repairing = self
+            .runtime_repairing
+            .lock()
+            .expect("task runtime poisoned");
+        if !running.is_empty() || *repairing {
+            return false;
+        }
+        *repairing = true;
+        true
+    }
+
+    pub fn end_runtime_repair(&self) {
+        *self
+            .runtime_repairing
+            .lock()
+            .expect("task runtime poisoned") = false;
+    }
+
+    pub fn is_runtime_repairing(&self) -> bool {
+        *self
+            .runtime_repairing
+            .lock()
+            .expect("task runtime poisoned")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_repair_and_task_execution_exclude_each_other() {
+        let runtime = TaskRuntime::default();
+        assert!(runtime.register("task"));
+        assert!(!runtime.begin_runtime_repair());
+        runtime.unregister("task");
+        assert!(runtime.begin_runtime_repair());
+        assert!(!runtime.begin_runtime_repair());
+        assert!(!runtime.register("other-task"));
+        runtime.end_runtime_repair();
+        assert!(runtime.register("other-task"));
     }
 }

@@ -1,52 +1,56 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import type { ArtifactBundle } from '@/types/models';
+import AppIcon from '@/components/icons/AppIcon.vue';
+import { artifactImageUrl } from '@/lib/studio';
+import type { ArtifactBundle, ArtifactFile } from '@/types/models';
 
-const props = defineProps<{
-  artifacts: ArtifactBundle | null;
-}>();
-
+const props = withDefaults(defineProps<{ artifacts: ArtifactBundle | null; highlightRole?: string }>(), { highlightRole: '' });
+const emit = defineEmits<{ select: [file: ArtifactFile] }>();
 const screenshots = computed(() => props.artifacts?.screenshots ?? []);
-
-function toDataUrl(contents: string, contentType: string): string {
-  return contentType === 'image/svg+xml'
-    ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(contents)}`
-    : `data:${contentType};base64,${contents}`;
-}
 </script>
 
 <template>
-  <section class="panel">
-    <header class="panel-header">
-      <h3>截图证据</h3>
-      <p>保存任务关键页面的可视证据，便于人工回看。</p>
-    </header>
-
-    <div
-      v-if="screenshots.length"
-      class="shot-grid"
+  <div
+    v-if="screenshots.length"
+    class="evidence-gallery"
+  >
+    <figure
+      v-for="shot in screenshots"
+      :key="shot.path"
+      class="shot-card"
+      :data-highlight="Boolean(highlightRole && shot.label === `${highlightRole}.png`)"
     >
-      <figure
-        v-for="shot in screenshots"
-        :key="shot.path"
-        class="shot-card"
+      <button
+        type="button"
+        :aria-label="`预览 ${shot.label}`"
+        :title="shot.path"
+        @click="emit('select', shot)"
       >
         <img
-          :src="toDataUrl(shot.contents, shot.contentType)"
+          :src="artifactImageUrl(shot)"
           :alt="shot.label"
+          loading="lazy"
         >
-        <figcaption>
-          <strong>{{ shot.label }}</strong>
-          <span>{{ shot.path }}</span>
-        </figcaption>
-      </figure>
-    </div>
-
-    <p
-      v-else
-      class="muted-copy"
-    >
-      当前任务还没有截图产物。
-    </p>
-  </section>
+        <span class="shot-card__zoom"><AppIcon
+          name="search"
+          :size="18"
+        /></span>
+      </button>
+      <figcaption>
+        <AppIcon
+          name="image"
+          :size="14"
+        /><strong>{{ shot.label }}</strong>
+      </figcaption>
+    </figure>
+  </div>
+  <div
+    v-else
+    class="empty-state"
+  >
+    <AppIcon
+      name="image"
+      :size="32"
+    /><strong>暂无截图</strong>
+  </div>
 </template>

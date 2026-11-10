@@ -1,11 +1,13 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, '..', '..');
+const require = createRequire(import.meta.url);
 
 async function readInput() {
   const chunks = [];
@@ -53,14 +55,26 @@ function pushUnique(items, value) {
 }
 
 async function capturePage({ page, outputDir, role, artifactManifest, pageResults, log }) {
-  await log.write(`capture role=${role} url=${page.url()}`);
+  // shortcut: 取证截图跳过字体等待；升级 Playwright 时复测阻塞脚本场景。
+  process.env.PW_TEST_SCREENSHOT_NO_FONTS_READY = '1';
+  await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() =>
+    log.write(`capture-load-timeout role=${role} url=${page.url()} evidence=current-dom`));
   const htmlRelativePath = path.join('dom', `${role}.html`);
   const screenshotRelativePath = path.join('screenshots', `${role}.png`);
   await writeArtifact(outputDir, htmlRelativePath, await page.content());
-  await page.screenshot({
+  const screenshotOptions = {
     path: path.join(outputDir, screenshotRelativePath),
     fullPage: true,
-  });
+  };
+  try {
+    await page.screenshot(screenshotOptions);
+  } catch (error) {
+    if (!String(error).includes('Unable to capture screenshot')) throw error;
+    await log.write(`capture-screenshot-retry role=${role} url=${page.url()}`);
+    await page.waitForTimeout(150);
+    await page.screenshot(screenshotOptions);
+  }
+  await log.write(`capture role=${role} url=${page.url()}`);
 
   pushUnique(artifactManifest.dom, htmlRelativePath);
   pushUnique(artifactManifest.screenshots, screenshotRelativePath);
@@ -119,7 +133,7 @@ async function summarizePage(page) {
         label: label || anchor.getAttribute('title') || url,
         url,
       });
-      if (links.length >= 24) {
+      if (links.length >= 96) {
         break;
       }
     }
@@ -284,19 +298,27 @@ async function detectSearchForm(page) {
   });
 }
 
-async function submitDetectedSearchForm(page, keyword, preferredInputName) {
+async function submitDetectedSearchForm(page, keyword, preferredInputName, expectedForm = null) {
   if (!keyword) {
     return null;
   }
 
   const startUrl = page.url();
-  const result = await page.evaluate(({ value, preferredName }) => {
+  const result = await page.evaluate(({ value, preferredName, expectedForm }) => {
     const forms = [...document.querySelectorAll('form')];
     for (const form of forms) {
+      const action = form.action;
+      const method = (form.getAttribute('method') || 'get').toLowerCase();
+      if (expectedForm && (action !== expectedForm.action || method !== expectedForm.method)) {
+        continue;
+      }
       const inputs = [...form.querySelectorAll('input[name], textarea[name]')];
       const textInput = inputs.find((input) => {
         const type = (input.getAttribute('type') || 'text').toLowerCase();
         const name = (input.getAttribute('name') || '').trim();
+        if (expectedForm) {
+          return name === preferredName;
+        }
         return (
           type === 'text'
           || type === 'search'
@@ -313,8 +335,6 @@ async function submitDetectedSearchForm(page, keyword, preferredInputName) {
       textInput.setAttribute('value', value);
 
       const inputName = textInput.getAttribute('name') || preferredName || '';
-      const action = form.getAttribute('action') || '';
-      const method = (form.getAttribute('method') || 'get').toLowerCase();
       const submitter = form.querySelector('button[type="submit"], input[type="submit"], button');
 
       if (submitter instanceof HTMLElement) {
@@ -383,6 +403,7 @@ async function submitDetectedSearchForm(page, keyword, preferredInputName) {
   }, {
     value: keyword,
     preferredName: preferredInputName || '',
+    expectedForm,
   });
 
   if (!result) {
@@ -491,40 +512,17 @@ async function openSearchPageWithPlan(page, testKeyword, searchForm) {
     return null;
   }
 
-  const detected = await detectSearchForm(page);
   const providedAction = String(searchForm?.action || '').trim();
   const providedMethod = String(searchForm?.method || 'get').trim().toLowerCase();
   const providedQueryParam = String(searchForm?.queryParam || '').trim();
-
-  const detectedAction = detected?.action
-    ? new URL(detected.action, page.url()).toString()
-    : '';
-  const detectedMethod = String(detected?.method || 'get').trim().toLowerCase();
-  const detectedQueryParam = String(detected?.inputName || '').trim();
-
-  const hasDetectedForm = Boolean(detectedAction && detectedQueryParam);
-  const providedMatchesDetected = hasDetectedForm
-    && providedAction
-    && providedQueryParam
-    && new URL(providedAction, page.url()).toString() === detectedAction
-    && providedMethod === detectedMethod
-    && providedQueryParam === detectedQueryParam;
-
-  if (!providedAction || !providedQueryParam || !providedMatchesDetected) {
-    if (providedAction || providedQueryParam) {
-      page.__codexSearchPlanMismatch = {
-        providedAction,
-        providedMethod,
-        providedQueryParam,
-        detectedAction,
-        detectedMethod,
-        detectedQueryParam,
-      };
-    }
-    return openSearchPage(page, testKeyword);
+  if (!providedAction || !providedQueryParam) {
+    return null;
   }
 
-  const submitted = await submitDetectedSearchForm(page, testKeyword, providedQueryParam);
+  const submitted = await submitDetectedSearchForm(page, testKeyword, providedQueryParam, {
+    action: new URL(providedAction, page.url()).toString(),
+    method: providedMethod,
+  });
   if (!submitted) {
     return null;
   }
@@ -610,101 +608,6 @@ async function waitForAnySelector(page, selectors, timeoutMs) {
   return null;
 }
 
-function appendPathSegment(pathname, segment) {
-  const base = pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
-  return `${base}/${segment}`;
-}
-
-function addCandidate(candidates, value) {
-  const normalized = String(value || '').trim();
-  if (!normalized || candidates.includes(normalized)) {
-    return;
-  }
-  candidates.push(normalized);
-}
-
-function buildSearchUrlCandidates(baseUrl, actionUrl, queryParam, keyword) {
-  const candidates = [];
-  const encodedKeyword = encodeURIComponent(String(keyword || '').trim());
-  if (!encodedKeyword) {
-    return candidates;
-  }
-
-  const paramName = String(queryParam || '').trim() || 'searchkey';
-  const fallbackAction = String(actionUrl || '').trim() || String(baseUrl || '').trim();
-  let resolved;
-  try {
-    resolved = new URL(fallbackAction, baseUrl);
-  } catch {
-    return candidates;
-  }
-
-  const resolvedHref = resolved.toString();
-  addCandidate(candidates, resolvedHref);
-
-  const withQuery = new URL(resolvedHref);
-  withQuery.searchParams.set(paramName, encodedKeyword);
-  addCandidate(candidates, withQuery.toString().replace(/%25/g, '%'));
-
-  const withPage = new URL(withQuery.toString());
-  if (!withPage.searchParams.has('page')) {
-    withPage.searchParams.set('page', '1');
-  }
-  addCandidate(candidates, withPage.toString().replace(/%25/g, '%'));
-
-  const pathname = resolved.pathname || '/';
-  if (!pathname.endsWith('.html')) {
-    const htmlUrl = new URL(resolvedHref);
-    htmlUrl.pathname = `${pathname.replace(/\/$/, '')}.html`;
-    addCandidate(candidates, htmlUrl.toString());
-
-    const htmlWithQuery = new URL(htmlUrl.toString());
-    htmlWithQuery.searchParams.set(paramName, encodedKeyword);
-    addCandidate(candidates, htmlWithQuery.toString().replace(/%25/g, '%'));
-  }
-
-  const pathWithKeyword = new URL(resolvedHref);
-  pathWithKeyword.pathname = `${appendPathSegment(pathname, encodedKeyword)}.html`;
-  pathWithKeyword.search = '';
-  addCandidate(candidates, pathWithKeyword.toString().replace(/%25/g, '%'));
-
-  return candidates;
-}
-
-async function collectSearchEntryCandidates(page) {
-  return page.evaluate(() => {
-    const scoreHref = (href, text) => {
-      const value = `${href || ''} ${text || ''}`.toLowerCase();
-      let score = 0;
-      if (/搜索|搜书|search|find/.test(value)) score += 8;
-      if (/\/so(\/|\.|$)/.test(value)) score += 6;
-      if (/\/search(\/|\.|$)|s\?/.test(value)) score += 4;
-      return score;
-    };
-
-    const rows = [];
-    for (const anchor of [...document.querySelectorAll('a[href]')]) {
-      const href = anchor.getAttribute('href') || '';
-      if (!href) continue;
-      const text = (anchor.textContent || '').replace(/\s+/g, ' ').trim();
-      const score = scoreHref(href, text);
-      if (score <= 0) continue;
-      rows.push({
-        score,
-        url: new URL(href, window.location.href).toString(),
-      });
-    }
-
-    rows.sort((a, b) => b.score - a.score);
-    const unique = [];
-    for (const row of rows) {
-      if (!unique.includes(row.url)) unique.push(row.url);
-      if (unique.length >= 6) break;
-    }
-    return unique;
-  });
-}
-
 async function hasSearchResultSignal(page, keyword) {
   const strongSelectors = [
     '.librarylist li',
@@ -770,55 +673,6 @@ async function hasSearchResultSignal(page, keyword) {
     foundStrong: strongFound || '',
     genericSelectorList: genericSelectors,
   });
-}
-
-async function recoverSearchResultPage(page, options) {
-  const {
-    baseUrl,
-    actionUrl,
-    queryParam,
-    keyword,
-    log,
-  } = options;
-  const fallbackCandidates = buildSearchUrlCandidates(baseUrl, actionUrl, queryParam, keyword);
-  const discoveredEntries = await collectSearchEntryCandidates(page).catch(() => []);
-
-  const allCandidates = [];
-  for (const url of fallbackCandidates) addCandidate(allCandidates, url);
-  for (const entry of discoveredEntries) {
-    addCandidate(allCandidates, entry);
-    for (const url of buildSearchUrlCandidates(baseUrl, entry, queryParam, keyword)) {
-      addCandidate(allCandidates, url);
-    }
-  }
-
-  if (!allCandidates.length) {
-    await log.write('search-recover no-candidate');
-    return null;
-  }
-
-  await log.write(`search-recover candidates=${allCandidates.length}`);
-  for (const candidate of allCandidates.slice(0, 12)) {
-    await log.write(`search-recover try=${candidate}`);
-    const opened = await safeGoto(page, candidate).catch(() => false);
-    if (!opened) {
-      await log.write(`search-recover skip-open-failed=${candidate}`);
-      continue;
-    }
-    await page.waitForLoadState('domcontentloaded').catch(() => {});
-    await page.waitForTimeout(250);
-    const signal = await hasSearchResultSignal(page, keyword);
-    if (signal?.matched) {
-      await log.write(`search-recover success=${candidate} reason=${signal.reason} selector=${signal.selector || ''}`);
-      return {
-        url: page.url(),
-        reason: signal.reason || 'unknown',
-      };
-    }
-  }
-
-  await log.write('search-recover exhausted');
-  return null;
 }
 
 async function findBestSearchResultHref(page, testKeyword) {
@@ -995,7 +849,7 @@ async function sampleFixture({ fixtureName, fixturesDir, outputDir }) {
 async function sampleLiveSite({ targetUrl, outputDir, testKeyword }) {
   let browser;
   try {
-    const playwright = await import('playwright');
+    const playwright = require(process.env.AISD_PLAYWRIGHT_MODULE || 'playwright');
     browser = await playwright.chromium.launch();
     const page = await browser.newPage();
     page.setDefaultNavigationTimeout(12000);
@@ -1265,7 +1119,7 @@ async function inspectLivePage({
 }) {
   let browser;
   try {
-    const playwright = await import('playwright');
+    const playwright = require(process.env.AISD_PLAYWRIGHT_MODULE || 'playwright');
     browser = await playwright.chromium.launch();
     const page = await browser.newPage();
     page.setDefaultNavigationTimeout(12000);
@@ -1328,22 +1182,15 @@ async function inspectLivePage({
       }
     });
 
-    let searchEntryUrl = '';
     let searchExecution = null;
     if (mode === 'search') {
       await log.write(`goto-search-entry url=${targetUrl}`);
       await safeGoto(page, targetUrl);
-      searchEntryUrl = page.url();
       searchExecution = await openSearchPageWithPlan(page, testKeyword, searchForm);
-      if (page.__codexSearchPlanMismatch) {
-        const mismatch = page.__codexSearchPlanMismatch;
-        await log.write(
-          `search-plan-mismatch providedAction=${mismatch.providedAction} providedMethod=${mismatch.providedMethod} providedQueryParam=${mismatch.providedQueryParam} detectedAction=${mismatch.detectedAction} detectedMethod=${mismatch.detectedMethod} detectedQueryParam=${mismatch.detectedQueryParam}`,
-        );
-      }
       if (!searchExecution) {
-        await log.write('search-form-missing fallback=open-current-page');
-        await page.waitForTimeout(300);
+        await log.write('search-unavailable reason=no-matching-executable-observed-form');
+        await capturePage({ page, outputDir, role: 'search-failed', artifactManifest, pageResults, log });
+        throw new Error('search unavailable: no matching executable observed search form');
       } else {
         await log.write(
           `search-submitted source=${searchExecution.source} submitMode=${searchExecution.submitMode || ''} formAction=${searchExecution.action} formMethod=${searchExecution.method} queryParam=${searchExecution.queryParam}`,
@@ -1368,14 +1215,9 @@ async function inspectLivePage({
           `wait-search-ready success reason=${searchSignal.reason} selector=${searchSignal.selector || ''}`,
         );
       } else {
-        await log.write('wait-search-ready timeout fallback=continue');
-        await recoverSearchResultPage(page, {
-          baseUrl: searchEntryUrl || targetUrl,
-          actionUrl: searchExecution?.action || searchForm?.action || '',
-          queryParam: searchExecution?.queryParam || searchForm?.queryParam || 'searchkey',
-          keyword: testKeyword || '',
-          log,
-        });
+        await log.write('search-unavailable reason=no-observed-result');
+        await capturePage({ page, outputDir, role: 'search-failed', artifactManifest, pageResults, log });
+        throw new Error('search unavailable: submitted form produced no observed search results');
       }
       const html = await page.content();
       if (isEffectivelyEmptyHtml(html)) {
@@ -1403,6 +1245,7 @@ async function inspectLivePage({
       excerpt: summary.excerpt,
       links: summary.links,
       forms: summary.forms,
+      hints: summary.hints,
       networkSamples,
       manifest: artifactManifest,
     };

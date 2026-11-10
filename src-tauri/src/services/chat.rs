@@ -23,21 +23,12 @@ pub(super) async fn chat_repair_task(
     let _guard = RunningTaskGuard::register(state, task_id)?;
     let paths = &state.paths;
     let mut task = get_task(paths, task_id)?;
-    let sampled = load_sampled_from_task(paths, &task)?.unwrap_or_default();
+    let mut sampled = load_sampled_from_task(paths, &task)?.unwrap_or_default();
     let Some(existing_candidate) = task.source_candidate.clone() else {
         bail!("task has no source candidate");
     };
 
-    let key = api_key
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            load_settings(paths)
-                .ok()
-                .map(|settings| settings.api_key.trim().to_string())
-                .filter(|value| !value.is_empty())
-        })
-        .ok_or_else(|| anyhow!("chat repair requires api key"))?;
+    let key = resolve_model_key(paths, &ai_settings, api_key);
 
     if ai_settings.base_url.trim().is_empty() || ai_settings.base_url.starts_with("mock://") {
         bail!("chat repair requires a real model endpoint");
@@ -54,10 +45,19 @@ pub(super) async fn chat_repair_task(
 
     let operation = async {
         ensure_not_cancelled(state, &task.id)?;
-        append_log(&mut task, TaskStatus::Repairing, "对话修复：准备上下文与提示词。");
+        explore::capture_next_page(state, &mut task, &mut sampled)?;
+        append_log(
+            &mut task,
+            TaskStatus::Repairing,
+            "对话修复：准备上下文与提示词。",
+        );
         persist_and_flush(state, &mut task)?;
         let prompt = build_chat_repair_prompt(paths, &task, &sampled, trimmed_message)?;
-        append_log(&mut task, TaskStatus::Repairing, "对话修复：请求模型生成修复建议。");
+        append_log(
+            &mut task,
+            TaskStatus::Repairing,
+            "对话修复：请求模型生成修复建议。",
+        );
         persist_and_flush(state, &mut task)?;
         let content = request_model_message(
             paths,
@@ -79,7 +79,11 @@ pub(super) async fn chat_repair_task(
         let mut task_reply = payload.reply.trim().to_string();
 
         if let Some(book_source) = payload.book_source {
-            append_log(&mut task, TaskStatus::Repairing, "对话修复：应用规则补丁并执行验证。");
+            append_log(
+                &mut task,
+                TaskStatus::Repairing,
+                "对话修复：应用规则补丁并执行验证。",
+            );
             persist_and_flush(state, &mut task)?;
             let candidate_json = json!({
                 "strategy": "chat-repair",
@@ -99,9 +103,15 @@ pub(super) async fn chat_repair_task(
             }))?;
 
             let repaired_candidate = parse_candidate_from_openai(paths, &sampled, &body)?;
-            let merged_candidate = merge_candidates(existing_candidate, repaired_candidate);
+            let merged_candidate = merge_repair_candidates(existing_candidate, repaired_candidate);
             let mut merged_candidate = merged_candidate;
             let _ = sanitize_candidate(&mut merged_candidate);
+            explore::complete_pagination(
+                paths,
+                &task.id,
+                &sampled,
+                &mut merged_candidate.book_source,
+            )?;
             task.source_candidate = Some(merged_candidate.clone());
             task.validation_report = Some(validate_candidate(
                 paths,
@@ -112,6 +122,17 @@ pub(super) async fn chat_repair_task(
             )?);
 
             if report_is_usable(task.validation_report.as_ref().expect("validated")) {
+                let explore = &task.validation_report.as_ref().expect("validated").explore;
+                if !explore.passed && merged_candidate.book_source.explore_url.is_some() {
+                    let warning = format!(
+                        "书海未通过验证，已关闭书海入口并保留已验证的搜索能力：{}",
+                        explore.summary
+                    );
+                    merged_candidate.book_source.enabled_explore = Some(false);
+                    task.source_candidate = Some(merged_candidate.clone());
+                    append_log(&mut task, TaskStatus::Completed, &warning);
+                    task_reply = format!("{task_reply}\n{warning}").trim().to_string();
+                }
                 task.status = TaskStatus::Completed;
                 task.error_summary = None;
                 let (relative_path, _) = export_candidate(paths, &task.id, &merged_candidate)?;
@@ -193,26 +214,24 @@ fn build_chat_repair_prompt(
     let validation = serde_json::to_string_pretty(&task.validation_report)?;
     let task_log = tail_file(&paths.task_path(&task.id, "logs/task.log"), 120);
     let worker_log = tail_file(&paths.task_path(&task.id, "logs/worker.log"), 160);
-    let pages = sampled
-        .pages
-        .iter()
-        .map(|page| format!("- {} {}", page.role, page.url))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let evidence = build_prompt(paths, &task.id, sampled)?;
 
     Ok(format!(
-        "User request:\n{message}\n\nTask id: {task_id}\nTarget: {target}\nLast error: {error}\n\nSampled pages:\n{pages}\n\nCurrent bookSource:\n{current_source}\n\nValidation report:\n{validation}\n\nTask log tail:\n{task_log}\n\nWorker log tail:\n{worker_log}\n\nReturn one JSON object:\n{{\"reply\":\"...\",\"bookSource\":{{...optional updated book source...}}}}\nOnly include bookSource when you want to apply a repair.",
+        "User request:\n{message}\n\nTask id: {task_id}\nTarget: {target}\nLast error: {error}\n\n{evidence}\n\nCurrent bookSource:\n{current_source}\n\nValidation report:\n{validation}\n\nTask log tail:\n{task_log}\n\nWorker log tail:\n{worker_log}\n\nReturn one JSON object:\n{{\"reply\":\"...\",\"bookSource\":{{...optional updated book source...}}}}\nOnly include bookSource when you want to apply a repair. Keep validated rules stable.",
         task_id = task.id,
         target = task.target_url,
         error = task.error_summary.clone().unwrap_or_default(),
     ))
 }
 
-fn tail_file(path: &Path, limit: usize) -> String {
+pub(super) fn tail_file(path: &Path, limit: usize) -> String {
     let Ok(content) = fs::read_to_string(path) else {
         return String::new();
     };
-    let lines = content.lines().collect::<Vec<_>>();
+    let lines = content
+        .lines()
+        .filter(|line| !line.contains("model-request-payload purpose="))
+        .collect::<Vec<_>>();
     let start = lines.len().saturating_sub(limit);
     lines[start..].join("\n")
 }

@@ -2,9 +2,13 @@ mod domain;
 mod services;
 mod state;
 mod worker;
+mod worker_runtime;
 
 use anyhow::Result;
-use domain::{AgentChatRepairResult, AiSettings, ArtifactBundle, TaskDraft, TaskRecord};
+use domain::{
+    AgentChatRepairResult, AiSettings, ArtifactBundle, ConnectionTestResult, RuntimeDiagnostics,
+    TaskDraft, TaskRecord,
+};
 use services::{
     chat_repair_task as chat_repair_task_impl, create_task as create_task_impl,
     delete_task as delete_task_impl, export_task_source as export_task_source_impl,
@@ -101,6 +105,63 @@ fn export_task_source(
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+async fn test_ai_connection(settings: AiSettings) -> Result<ConnectionTestResult, String> {
+    services::test_ai_connection(&settings)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn get_runtime_diagnostics(state: State<'_, AppState>) -> Result<RuntimeDiagnostics, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || services::runtime_diagnostics(&paths))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn repair_playwright(state: State<'_, AppState>) -> Result<RuntimeDiagnostics, String> {
+    let app_state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || services::repair_playwright(&app_state))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn get_runtime_repair_log(state: State<'_, AppState>) -> String {
+    worker_runtime::repair_log(&state.paths)
+}
+
+#[tauri::command]
+fn open_data_directory(state: State<'_, AppState>) -> Result<(), String> {
+    services::open_data_directory(&state.paths).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn revalidate_task(
+    state: State<'_, AppState>,
+    task_id: String,
+) -> Result<TaskRecord, String> {
+    let app_state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || services::revalidate_task(&app_state, &task_id))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn export_task_log(
+    state: State<'_, AppState>,
+    task_id: String,
+    kind: String,
+    output_path: String,
+) -> Result<(), String> {
+    services::export_task_log(&state.paths, &task_id, &kind, &output_path)
+        .map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -115,6 +176,13 @@ pub fn run() {
             chat_repair_task,
             get_task_artifacts,
             export_task_source,
+            test_ai_connection,
+            get_runtime_diagnostics,
+            repair_playwright,
+            get_runtime_repair_log,
+            open_data_directory,
+            revalidate_task,
+            export_task_log,
         ])
         .setup(|app| {
             let state = initialize(&app.handle()).map_err(|error| error.to_string())?;

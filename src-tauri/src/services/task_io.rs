@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Write;
 
 pub(super) fn read_files(
     paths: &AppPaths,
@@ -65,18 +66,24 @@ pub(super) fn finalize_pending_delete(state: &AppState, task_id: &str) -> Result
 
 pub(super) fn write_logs(paths: &AppPaths, task: &TaskRecord) -> Result<()> {
     let log_path = paths.task_path(&task.id, "logs/task.log");
-    let mut body = String::new();
+    let existing = fs::read_to_string(&log_path).unwrap_or_default();
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
 
     for entry in &task.logs {
-        body.push_str(&format!(
+        let line = format!(
             "{} [{}] {}\n",
             entry.at.to_rfc3339(),
             serde_json::to_string(&entry.stage)?,
             entry.message
-        ));
+        );
+        if !existing.contains(&line) {
+            file.write_all(line.as_bytes())?;
+        }
     }
 
-    fs::write(log_path, body)?;
     Ok(())
 }
 

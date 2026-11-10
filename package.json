@@ -1,7 +1,7 @@
 {
   "name": "ai-source-designer",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1433",
@@ -11,7 +11,9 @@
     "test:web": "vitest run",
     "lint": "eslint .",
     "playwright:install": "playwright install chromium",
+    "worker:bundle": "node scripts/bundle-worker.mjs",
     "smoke:live": "node scripts/live-smoke.mjs",
+    "smoke:worker": "node scripts/worker-regression.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

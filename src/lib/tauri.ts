@@ -10,6 +10,8 @@ import type {
   AiSettings,
   ArtifactBundle,
   ChatRepairTaskPayload,
+  ConnectionTestResult,
+  RuntimeDiagnostics,
   StartTaskPayload,
   TaskDraft,
   TaskRecord,
@@ -40,6 +42,39 @@ export async function loadSettings(): Promise<AiSettings> {
 
 export async function saveSettings(settings: AiSettings): Promise<AiSettings> {
   return invokeOrThrow<AiSettings>('save_settings', { settings });
+}
+
+export function testAiConnection(settings: AiSettings): Promise<ConnectionTestResult> {
+  return invokeOrThrow<ConnectionTestResult>('test_ai_connection', { settings });
+}
+
+export function getRuntimeDiagnostics(): Promise<RuntimeDiagnostics> {
+  return invokeOrThrow<RuntimeDiagnostics>('get_runtime_diagnostics');
+}
+
+export function repairPlaywright(): Promise<RuntimeDiagnostics> {
+  return invokeOrThrow<RuntimeDiagnostics>('repair_playwright');
+}
+
+export function getRuntimeRepairLog(): Promise<string> {
+  return invokeOrThrow<string>('get_runtime_repair_log');
+}
+
+export function openDataDirectory(): Promise<void> {
+  return invokeOrThrow<void>('open_data_directory');
+}
+
+export function revalidateTask(taskId: string): Promise<TaskRecord> {
+  return invokeOrThrow<TaskRecord>('revalidate_task', { taskId });
+}
+
+export function exportTaskLog(taskId: string, kind: 'task' | 'worker', outputPath: string): Promise<void> {
+  return invokeOrThrow<void>('export_task_log', { taskId, kind, outputPath });
+}
+
+export async function pickLogSavePath(defaultPath: string): Promise<string | null> {
+  const selected = await save({ defaultPath, filters: [{ name: '日志', extensions: ['log', 'txt'] }] });
+  return typeof selected === 'string' ? selected : null;
 }
 
 export async function listTasks(): Promise<TaskRecord[]> {

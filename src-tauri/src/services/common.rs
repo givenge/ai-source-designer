@@ -1,5 +1,29 @@
 use super::*;
 
+pub(super) fn is_site_url(target_url: &str, url: &str) -> bool {
+    if target_url.starts_with("fixture://") {
+        return true;
+    }
+    let (Ok(target), Ok(candidate)) = (Url::parse(target_url), Url::parse(url)) else {
+        return false;
+    };
+    if !matches!(candidate.scheme(), "http" | "https") {
+        return false;
+    }
+    let (Some(target_host), Some(candidate_host)) = (target.host_str(), candidate.host_str())
+    else {
+        return false;
+    };
+    let target_host = target_host.strip_prefix("www.").unwrap_or(target_host);
+    let candidate_host = candidate_host
+        .strip_prefix("www.")
+        .unwrap_or(candidate_host);
+    // shortcut: 范围限于目标域名及子域，跨域书籍托管需经过单独证据验证再扩展。
+    (target_host == candidate_host
+        || (target.domain().is_some() && candidate_host.ends_with(&format!(".{target_host}"))))
+        && (target.port().is_none() || target.port() == candidate.port())
+}
+
 pub(super) fn normalize_url(base: &str, maybe_relative: &str) -> Result<String> {
     if maybe_relative.trim().is_empty() {
         return Ok(String::new());

@@ -77,6 +77,12 @@ dist/
 
 首次拉起前需要先安装依赖。
 
+运行依赖系统 Node.js（含 npm）。应用随附 Worker，优先使用已修复的用户目录依赖、系统全局 Playwright，再使用开发目录依赖。macOS GUI 会同时查找 Homebrew 与常见 Node.js 安装路径。
+
+设置页提供环境检测和“一键修复”：联网安装 Playwright 与匹配的 Chromium 到 `~/.aisourcedesign/runtime/playwright/`，验证浏览器启动后启用。安装日志位于 `~/.aisourcedesign/logs/playwright-repair.log`；任务执行期间不能修复运行时，安装失败保留原环境和日志。
+
+直接运行开发态 smoke 前可执行 `pnpm playwright:install`。`pnpm smoke:worker` 使用系统 Node.js，检查无搜索表单、缺少或错误计划、混合表单、GET/POST 搜索及阻塞脚本截图；这些回归只访问本地测试站点。`pnpm tauri dev` 和常规构建不再预下载或打包 Node.js、Playwright 和 Chromium。
+
 当前已验证通过的命令：
 
 - `pnpm build`
@@ -125,8 +131,10 @@ pnpm smoke:live -- https://www.gutenberg.org/ebooks/search/?query=sherlock
 - 任务状态机：`draft -> sampling -> synthesizing -> validating -> repairing -> completed|failed`
 - 任务详情页支持失败后继续执行
 - 产物目录：`tasks/<task_id>/screenshots|dom|network|logs|output`
-- 导出字段只覆盖 `searchUrl`、`ruleSearch`、`ruleBookInfo`、`ruleToc`、`ruleContent`
+- 导出支持 `exploreUrl`、`ruleExplore`、`searchUrl`、`ruleSearch`、`ruleBookInfo`、`ruleToc`、`ruleContent`
+- 书海分页依据首页和实际下一页链接生成模板，验证下一页能提取新的书籍；保留分类分组与样式
+- 搜索或书海至少一条经过验证才能完成任务；书海修复后仍失败时关闭该能力，并保留已验证的搜索能力及失败说明
 - 兼容性以 `../reader-rust/src/model/book_source.rs` 和 `../reader-rust/src/model/rule.rs` 为准
-- `ruleContent.title`、`ruleToc.updateTime` 不进入本项目 v1 输出
+- `ruleContent.title`、`ruleToc.updateTime` 按 Reader-Rust 当前模型作为可选字符串规则输出
 - 任务详情页提供任务概览、验证摘要、规则快照、任务日志和 worker 日志切换
 - Agent 对话修复默认回传模型响应内容，并在失败后允许继续修复

@@ -15,6 +15,28 @@ export interface AiSettings {
   apiKey: string;
 }
 
+export interface ConnectionTestResult {
+  model: string;
+  latencyMs: number;
+  mock: boolean;
+}
+
+export interface RuntimeDiagnostics {
+  version: string;
+  dataDir: string;
+  dbPath: string;
+  settingsPath: string;
+  workerScript: string;
+  workerReady: boolean;
+  databaseReady: boolean;
+  nodeVersion: string | null;
+  nodePath: string | null;
+  playwrightPath: string | null;
+  playwrightVersion: string | null;
+  browserVersion: string | null;
+  error: string | null;
+}
+
 export interface TaskDraft {
   targetUrl: string;
   testKeyword?: string | null;

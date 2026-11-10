@@ -8,11 +8,16 @@ const props = defineProps<{
 }>();
 
 const tone = computed(() => statusTone(props.status));
+const active = computed(() => ['sampling', 'synthesizing', 'validating', 'repairing'].includes(props.status));
 </script>
 
 <template>
   <span
     class="status-badge"
     :data-tone="tone"
-  >{{ statusLabel(status) }}</span>
+    :data-active="active"
+  ><span
+    class="status-dot"
+    aria-hidden="true"
+  />{{ statusLabel(status) }}</span>
 </template>

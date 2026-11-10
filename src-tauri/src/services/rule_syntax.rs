@@ -62,8 +62,42 @@ pub(super) fn normalize_reader_rule_syntax(value: &str) -> String {
     normalized
 }
 
+pub(super) fn normalize_css_rule_for_reader(value: &str) -> String {
+    let value = value.trim();
+    let rule = value
+        .strip_prefix("@css:")
+        .or_else(|| value.strip_prefix("@CSS:"))
+        .unwrap_or(value)
+        .trim_start();
+    let selector = rule
+        .split("##")
+        .next()
+        .unwrap_or(rule)
+        .split('@')
+        .next()
+        .unwrap_or_default()
+        .trim_end();
+    if ["class.", "id.", "tag.", "text."]
+        .iter()
+        .any(|prefix| selector.starts_with(prefix))
+        || !selector.chars().next().is_some_and(char::is_alphabetic)
+        || selector.split_whitespace().count() < 2
+        || Selector::parse(selector).is_err()
+    {
+        return value.to_string();
+    }
+
+    // Reader-Rust otherwise interprets tag-led descendant CSS as legacy class names.
+    format!("@css::is({selector}){}", &rule[selector.len()..])
+}
+
 pub(super) fn selector(input: &str) -> Result<Selector> {
     let plain = input.split("##").next().unwrap_or(input).trim();
+    let plain = plain
+        .strip_prefix("@css:")
+        .or_else(|| plain.strip_prefix("@CSS:"))
+        .unwrap_or(plain)
+        .trim();
     let selector = plain.split('@').next().unwrap_or_default().trim();
 
     Selector::parse(selector).map_err(|_| anyhow!("invalid selector: {selector}"))
@@ -101,7 +135,30 @@ fn evaluate_on_element(element: &ElementRef<'_>, rule: &str) -> Result<String> {
     }
 
     let parsed = parse_rule(rule);
-    let child = select_first_from_element(element, parsed.selector)?;
+    if parsed.selector.is_empty() {
+        return extract_value(*element, &parsed.mode);
+    }
+
+    // Reader field rules see the item's children, without the item or its ancestors.
+    let mut document = Html::new_fragment();
+    let mut pending = vec![(element.id(), document.tree.root().id())];
+    while let Some((source_id, parent_id)) = pending.pop() {
+        for child in element
+            .tree()
+            .get(source_id)
+            .expect("source node exists")
+            .children()
+        {
+            let id = document
+                .tree
+                .get_mut(parent_id)
+                .expect("parent node exists")
+                .append(child.value().clone())
+                .id();
+            pending.push((child.id(), id));
+        }
+    }
+    let child = select_first_from_document(&document, parsed.selector)?;
     extract_value(child, &parsed.mode)
 }
 
@@ -120,6 +177,11 @@ struct ParsedRule<'a> {
 
 fn parse_rule(rule: &str) -> ParsedRule<'_> {
     let base = rule.split("##").next().unwrap_or(rule).trim();
+    let base = base
+        .strip_prefix("@css:")
+        .or_else(|| base.strip_prefix("@CSS:"))
+        .unwrap_or(base)
+        .trim();
 
     if let Some((selector, _)) = base.split_once("@textNodes") {
         return ParsedRule {
@@ -153,7 +215,7 @@ fn parse_rule(rule: &str) -> ParsedRule<'_> {
     }
     if let Some((selector, attr)) = base.rsplit_once('@') {
         let attr = attr.trim();
-        if !selector.trim().is_empty() && !attr.is_empty() {
+        if !attr.is_empty() {
             return ParsedRule {
                 selector: selector.trim(),
                 mode: match attr {
@@ -220,32 +282,6 @@ fn select_first_from_document<'a>(
 
     let selector = Selector::parse(selector_text).map_err(|_| anyhow!("invalid selector"))?;
     document
-        .select(&selector)
-        .next()
-        .ok_or_else(|| anyhow!("selector did not match"))
-}
-
-fn select_first_from_element<'a>(
-    element: &'a ElementRef<'a>,
-    selector_text: &str,
-) -> Result<ElementRef<'a>> {
-    let selector_text = selector_text.trim();
-    if let Some(needle) = selector_text.strip_prefix("text.") {
-        let selector = Selector::parse("*").map_err(|_| anyhow!("invalid selector"))?;
-        return element
-            .select(&selector)
-            .find(|child| {
-                child
-                    .text()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .contains(needle.trim())
-            })
-            .ok_or_else(|| anyhow!("selector did not match"));
-    }
-
-    let selector = Selector::parse(selector_text).map_err(|_| anyhow!("invalid selector"))?;
-    element
         .select(&selector)
         .next()
         .ok_or_else(|| anyhow!("selector did not match"))

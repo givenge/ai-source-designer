@@ -34,6 +34,8 @@ mod candidate_parser;
 mod chat;
 #[path = "services/common.rs"]
 mod common;
+#[path = "services/explore.rs"]
+mod explore;
 #[path = "services/exporter.rs"]
 mod exporter;
 #[path = "services/inference.rs"]
@@ -46,6 +48,12 @@ mod repair;
 mod rule_syntax;
 #[path = "services/sampling_agent.rs"]
 mod sampling_agent;
+#[path = "services/studio.rs"]
+mod studio;
+pub use studio::{
+    export_task_log, open_data_directory, repair_playwright, revalidate_task, runtime_diagnostics,
+    test_ai_connection,
+};
 #[path = "services/task_io.rs"]
 mod task_io;
 #[path = "services/task_repo.rs"]
@@ -64,12 +72,14 @@ use agent_flow::{
 };
 #[allow(unused_imports)]
 use ai_runtime::{
-    build_repair_prompt, log_to_task_file, normalize_openai_endpoint, request_model_message,
-    synthesize_candidate,
+    build_dom_evidence, build_prompt, build_repair_prompt, log_to_task_file,
+    normalize_openai_endpoint, request_model_message, resolve_model_key, synthesize_candidate,
 };
 use candidate_parser::{parse_candidate_from_openai, sanitize_candidate};
 #[allow(unused_imports)]
-use common::{canonical_compare_url, keyword_match_score, normalize_url, sampled_page};
+use common::{
+    canonical_compare_url, is_site_url, keyword_match_score, normalize_url, sampled_page,
+};
 #[allow(unused_imports)]
 use exporter::{append_output, export_candidate, exportable_book_source_value, write_export_file};
 #[allow(unused_imports)]
@@ -79,7 +89,7 @@ use inference::{
     infer_toc_rule_from_sampled, sampled_document,
 };
 #[allow(unused_imports)]
-use merge::merge_candidates;
+use merge::{merge_candidates, merge_repair_candidates};
 #[allow(unused_imports)]
 use repair::{try_repair_candidate_with_model, try_repair_candidate_with_sampled};
 use rule_syntax::{
@@ -181,6 +191,9 @@ struct RunningTaskGuard {
 impl RunningTaskGuard {
     fn register(state: &AppState, task_id: &str) -> Result<Self> {
         if !state.runtime.register(task_id) {
+            if state.runtime.is_runtime_repairing() {
+                bail!("Playwright 正在修复，请稍后再启动任务。");
+            }
             bail!("task is still running");
         }
 

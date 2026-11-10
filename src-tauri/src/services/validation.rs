@@ -77,8 +77,11 @@ pub(super) fn report_is_usable(report: &ValidationReport) -> bool {
         && report.cleanup.passed
 }
 
-pub(super) fn report_requires_repair(report: &ValidationReport) -> bool {
+pub(super) fn report_requires_repair(report: &ValidationReport, source: &BookSource) -> bool {
     !report_is_usable(report)
+        || (source.enabled_explore != Some(false)
+            && source.explore_url.is_some()
+            && !report.explore.passed)
 }
 
 fn validate_explore(
@@ -88,9 +91,9 @@ fn validate_explore(
     candidate: &SourceCandidate,
 ) -> Result<ValidationPhase> {
     let Ok(page) = sampled_page(sampled, "explore") else {
-        return Ok(passed_phase(
-            "未采样探索页，暂时跳过探索验证。".into(),
-            vec!["当前任务没有单独的书海探索页样本。".into()],
+        return Ok(failed_phase(
+            "未采样探索页",
+            vec!["当前任务没有书海探索页样本，无法验证书海能力。".into()],
             Vec::new(),
         ));
     };
@@ -135,30 +138,139 @@ fn validate_explore(
         ));
     }
 
-    let first = items[0];
-    let name = evaluate_on_element_safe(&first, rule.name.as_deref().unwrap_or_default())?;
-    let book_url = normalize_url(
-        &page.url,
-        &evaluate_on_element_safe(&first, rule.book_url.as_deref().unwrap_or_default())?,
-    )?;
+    let mut results = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let name = evaluate_on_element_safe(item, rule.name.as_deref().unwrap_or_default())?;
+        let book_url = normalize_url(
+            &page.url,
+            &evaluate_on_element_safe(item, rule.book_url.as_deref().unwrap_or_default())?,
+        )?;
+        if name.trim().is_empty()
+            || book_url.trim().is_empty()
+            || !is_site_url(&page.url, &book_url)
+        {
+            return Ok(failed_phase(
+                "探索规则缺少书名或站内链接",
+                vec![format!(
+                    "第 {} 条结果未提取到书名或站内链接。字段规则应相对于 bookList 列表项，不能依赖列表项本身或外层容器。",
+                    index + 1
+                )],
+                sampled_page_evidence("explore", sampled),
+            ));
+        }
+        results.push((name, book_url));
+    }
+    let (name, book_url) = &results[0];
 
-    if name.trim().is_empty() || book_url.trim().is_empty() {
-        return Ok(failed_phase(
-            "探索规则缺少书名或链接",
-            vec!["ruleExplore.name 或 ruleExplore.bookUrl 没有提取到有效值。".into()],
-            sampled_page_evidence("explore", sampled),
+    let mut details = vec![
+        format!("探索入口：{explore_url}"),
+        format!("已验证 {} 条列表项的书名与链接。", results.len()),
+        format!("首个结果：{name}"),
+        format!("详情链接：{book_url}"),
+    ];
+    let mut evidence = sampled_page_evidence("explore", sampled);
+    if let Some(next) = explore::next_page_url(&page.url, &document) {
+        let Some(template) = explore::pagination_template(&page.url, &next) else {
+            return Ok(failed_phase(
+                "书海分页地址需要 Reader 验证",
+                vec![format!("无法从观察到的下一页链接推断页码模板：{next}")],
+                evidence,
+            ));
+        };
+        let mut matched = 0;
+        for rule_url in explore::urls(explore_url) {
+            let Some(first) =
+                explore::page_url(&rule_url, &candidate.book_source.book_source_url, 1)
+            else {
+                return Ok(failed_phase(
+                    "书海 URL 模板无法执行",
+                    vec![format!(
+                        "本地分页验证不支持此模板，请通过 Reader 验证：{rule_url}"
+                    )],
+                    evidence,
+                ));
+            };
+            let Some(expected) = explore::category_template(&page.url, &template, &first) else {
+                continue;
+            };
+            matched += 1;
+            let actual = explore::page_url(&rule_url, &candidate.book_source.book_source_url, 2);
+            let expected = explore::page_url(&expected, &candidate.book_source.book_source_url, 2);
+            if actual.as_deref().map(canonical_agent_key)
+                != expected.as_deref().map(canonical_agent_key)
+            {
+                return Ok(failed_phase("书海分页 URL 与证据不符", vec![format!("分类 URL 第 2 页没有匹配观察到的分页模式，固定入口会重复请求第 1 页：{rule_url}")], evidence));
+            }
+        }
+        if matched == 0 {
+            return Ok(failed_phase(
+                "书海分页入口缺少对应证据",
+                vec!["没有找到与采样分类结构一致的 exploreUrl。".into()],
+                evidence,
+            ));
+        }
+        let Ok(next_page) = sampled_page(sampled, "explore-next") else {
+            return Ok(failed_phase(
+                "书海下一页尚未实际验证",
+                vec![format!("需要采样下一页并检查是否返回新书籍：{next}")],
+                evidence,
+            ));
+        };
+        evidence.extend(sampled_page_evidence("explore-next", sampled));
+        if canonical_agent_key(&next_page.url) != canonical_agent_key(&next) {
+            return Ok(failed_phase(
+                "书海下一页地址不符",
+                vec![format!("期望 {next}，实际样本为 {}", next_page.url)],
+                evidence,
+            ));
+        }
+        let next_document = sampled_document(paths, task_id, next_page)?;
+        if let Some(third) = explore::next_page_url(&next_page.url, &next_document) {
+            let expected = explore::page_url(&template, &page.url, 3);
+            if expected.as_deref().map(canonical_agent_key) != Some(canonical_agent_key(&third)) {
+                return Ok(failed_phase(
+                    "书海第 3 页地址与证据不符",
+                    vec![format!(
+                        "从首页推断的模板未匹配第 2 页的下一页链接：{third}"
+                    )],
+                    evidence,
+                ));
+            }
+            details.push(format!("第 3 页地址已与第 2 页的下一页链接核对：{third}"));
+        }
+        let mut next_urls = Vec::new();
+        for item in next_document.select(&item_selector) {
+            let name = evaluate_on_element_safe(&item, rule.name.as_deref().unwrap_or_default())?;
+            let url = normalize_url(
+                &next_page.url,
+                &evaluate_on_element_safe(&item, rule.book_url.as_deref().unwrap_or_default())?,
+            )?;
+            if name.trim().is_empty() || url.trim().is_empty() || !is_site_url(&page.url, &url) {
+                return Ok(failed_phase(
+                    "书海下一页规则缺少书名或站内链接",
+                    vec!["第 2 页的列表项未提取到完整书籍信息或指向站外。".into()],
+                    evidence,
+                ));
+            }
+            next_urls.push(canonical_agent_key(&url));
+        }
+        let first_urls = results
+            .iter()
+            .map(|(_, url)| canonical_agent_key(url))
+            .collect::<std::collections::HashSet<_>>();
+        if !next_urls.iter().any(|url| !first_urls.contains(url)) {
+            return Ok(failed_phase(
+                "书海下一页为空或重复首页",
+                vec!["下一页没有返回新的书籍链接，不能仅凭页码模板判断分页可用。".into()],
+                evidence,
+            ));
+        }
+        details.push(format!(
+            "分页实测通过：下一页 {next} 返回 {} 本书，并包含新的书籍链接。",
+            next_urls.len()
         ));
     }
-
-    Ok(passed_phase(
-        "探索规则通过。".into(),
-        vec![
-            format!("探索入口：{explore_url}"),
-            format!("首个结果：{name}"),
-            format!("详情链接：{book_url}"),
-        ],
-        sampled_page_evidence("explore", sampled),
-    ))
+    Ok(passed_phase("探索规则通过。".into(), details, evidence))
 }
 
 fn ensure_compatibility(source: &BookSource) -> Result<()> {
@@ -166,18 +278,14 @@ fn ensure_compatibility(source: &BookSource) -> Result<()> {
         bail!("bookSourceName and bookSourceUrl are required");
     }
 
-    let value = serde_json::to_value(source)?;
-    if value
-        .pointer("/ruleContent/title")
-        .is_some_and(|field| !field.is_null())
+    if let Some(pattern) = source
+        .book_url_pattern
+        .as_deref()
+        .filter(|value| !value.is_empty())
     {
-        bail!("ruleContent.title is not supported by Reader-Rust model");
-    }
-    if value
-        .pointer("/ruleToc/updateTime")
-        .is_some_and(|field| !field.is_null())
-    {
-        bail!("ruleToc.updateTime is not supported by Reader-Rust model");
+        if pattern.contains("{{") || pattern.contains("${") || Regex::new(pattern).is_err() {
+            bail!("bookUrlPattern 必须是书籍详情 URL 的正则表达式，不能使用 URL 模板");
+        }
     }
 
     Ok(())

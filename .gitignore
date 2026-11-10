@@ -4,6 +4,7 @@ coverage
 .DS_Store
 *.log
 src-tauri/target
+src-tauri/resources/playwright
 src-tauri/.cargo
 artifacts/*
 !artifacts/.gitkeep
@@ -11,3 +12,4 @@ artifacts/*
 .cargo-home
 target-tauri-cli
 .idea
+.codegraph/

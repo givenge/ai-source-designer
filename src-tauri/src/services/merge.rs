@@ -1,5 +1,25 @@
 use super::*;
 
+pub(super) fn merge_repair_candidates(
+    current: SourceCandidate,
+    repaired: SourceCandidate,
+) -> SourceCandidate {
+    let original = current.book_source.clone();
+    let mut merged = merge_candidates(repaired, current);
+    let rules = merged.book_source;
+    merged.book_source = BookSource {
+        search_url: rules.search_url,
+        explore_url: rules.explore_url,
+        rule_search: rules.rule_search,
+        rule_explore: rules.rule_explore,
+        rule_book_info: rules.rule_book_info,
+        rule_toc: rules.rule_toc,
+        rule_content: rules.rule_content,
+        ..original
+    };
+    merged
+}
+
 pub(super) fn merge_candidates(
     mut inferred: SourceCandidate,
     model: SourceCandidate,

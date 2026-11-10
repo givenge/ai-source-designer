@@ -178,7 +178,10 @@ fn normalize_model_rule_strings(value: &mut Value) {
     }
 }
 
-fn normalize_book_source_rules(source: &mut BookSource) {
+pub(super) fn normalize_book_source_rules(source: &mut BookSource) {
+    source.book_url_pattern = source.book_url_pattern.take().filter(|pattern| {
+        !pattern.contains("{{") && !pattern.contains("${") && Regex::new(pattern).is_ok()
+    });
     source.search_url = source
         .search_url
         .take()
@@ -186,75 +189,80 @@ fn normalize_book_source_rules(source: &mut BookSource) {
 
     if let Some(rule) = source.rule_search.as_mut() {
         normalize_option_rule(&mut rule.check_key_word);
-        normalize_option_rule(&mut rule.book_list);
-        normalize_option_rule(&mut rule.name);
-        normalize_option_rule(&mut rule.author);
-        normalize_option_rule(&mut rule.intro);
-        normalize_option_rule(&mut rule.kind);
-        normalize_option_rule(&mut rule.last_chapter);
-        normalize_option_rule(&mut rule.update_time);
-        normalize_option_rule(&mut rule.book_url);
-        normalize_option_rule(&mut rule.cover_url);
-        normalize_option_rule(&mut rule.word_count);
+        normalize_option_selector_rule(&mut rule.book_list);
+        normalize_option_selector_rule(&mut rule.name);
+        normalize_option_selector_rule(&mut rule.author);
+        normalize_option_selector_rule(&mut rule.intro);
+        normalize_option_selector_rule(&mut rule.kind);
+        normalize_option_selector_rule(&mut rule.last_chapter);
+        normalize_option_selector_rule(&mut rule.update_time);
+        normalize_option_selector_rule(&mut rule.book_url);
+        normalize_option_selector_rule(&mut rule.cover_url);
+        normalize_option_selector_rule(&mut rule.word_count);
     }
     if let Some(rule) = source.rule_explore.as_mut() {
         normalize_option_rule(&mut rule.check_key_word);
-        normalize_option_rule(&mut rule.book_list);
-        normalize_option_rule(&mut rule.name);
-        normalize_option_rule(&mut rule.author);
-        normalize_option_rule(&mut rule.intro);
-        normalize_option_rule(&mut rule.kind);
-        normalize_option_rule(&mut rule.last_chapter);
-        normalize_option_rule(&mut rule.update_time);
-        normalize_option_rule(&mut rule.book_url);
-        normalize_option_rule(&mut rule.cover_url);
-        normalize_option_rule(&mut rule.word_count);
+        normalize_option_selector_rule(&mut rule.book_list);
+        normalize_option_selector_rule(&mut rule.name);
+        normalize_option_selector_rule(&mut rule.author);
+        normalize_option_selector_rule(&mut rule.intro);
+        normalize_option_selector_rule(&mut rule.kind);
+        normalize_option_selector_rule(&mut rule.last_chapter);
+        normalize_option_selector_rule(&mut rule.update_time);
+        normalize_option_selector_rule(&mut rule.book_url);
+        normalize_option_selector_rule(&mut rule.cover_url);
+        normalize_option_selector_rule(&mut rule.word_count);
     }
     if let Some(rule) = source.rule_book_info.as_mut() {
-        normalize_option_rule(&mut rule.init);
-        normalize_option_rule(&mut rule.name);
-        normalize_option_rule(&mut rule.author);
-        normalize_option_rule(&mut rule.intro);
-        normalize_option_rule(&mut rule.kind);
-        normalize_option_rule(&mut rule.last_chapter);
-        normalize_option_rule(&mut rule.update_time);
-        normalize_option_rule(&mut rule.cover_url);
-        normalize_option_rule(&mut rule.word_count);
-        normalize_option_rule(&mut rule.toc_url);
-        normalize_option_rule(&mut rule.can_re_name);
-        normalize_option_rule(&mut rule.download_urls);
+        normalize_option_selector_rule(&mut rule.init);
+        normalize_option_selector_rule(&mut rule.name);
+        normalize_option_selector_rule(&mut rule.author);
+        normalize_option_selector_rule(&mut rule.intro);
+        normalize_option_selector_rule(&mut rule.kind);
+        normalize_option_selector_rule(&mut rule.last_chapter);
+        normalize_option_selector_rule(&mut rule.update_time);
+        normalize_option_selector_rule(&mut rule.cover_url);
+        normalize_option_selector_rule(&mut rule.word_count);
+        normalize_option_selector_rule(&mut rule.toc_url);
+        normalize_option_selector_rule(&mut rule.can_re_name);
+        normalize_option_selector_rule(&mut rule.download_urls);
     }
     if let Some(rule) = source.rule_toc.as_mut() {
         normalize_option_rule(&mut rule.pre_update_js);
-        normalize_option_rule(&mut rule.init);
-        normalize_option_rule(&mut rule.chapter_list);
-        normalize_option_rule(&mut rule.chapter_name);
-        normalize_option_rule(&mut rule.chapter_url);
+        normalize_option_selector_rule(&mut rule.init);
+        normalize_option_selector_rule(&mut rule.chapter_list);
+        normalize_option_selector_rule(&mut rule.chapter_name);
+        normalize_option_selector_rule(&mut rule.chapter_url);
         normalize_option_rule(&mut rule.format_js);
-        normalize_option_rule(&mut rule.is_volume);
-        normalize_option_rule(&mut rule.is_vip);
-        normalize_option_rule(&mut rule.is_pay);
-        normalize_option_rule(&mut rule.update_time);
-        normalize_option_rule(&mut rule.next_toc_url);
-        rule.update_time = None;
+        normalize_option_selector_rule(&mut rule.is_volume);
+        normalize_option_selector_rule(&mut rule.is_vip);
+        normalize_option_selector_rule(&mut rule.is_pay);
+        normalize_option_selector_rule(&mut rule.update_time);
+        normalize_option_selector_rule(&mut rule.next_toc_url);
     }
     if let Some(rule) = source.rule_content.as_mut() {
-        normalize_option_rule(&mut rule.content);
-        normalize_option_rule(&mut rule.title);
-        normalize_option_rule(&mut rule.next_content_url);
+        normalize_option_selector_rule(&mut rule.content);
+        normalize_option_selector_rule(&mut rule.title);
+        normalize_option_selector_rule(&mut rule.next_content_url);
         normalize_option_rule(&mut rule.web_js);
         normalize_option_rule(&mut rule.source_regex);
         normalize_option_rule(&mut rule.replace_regex);
         normalize_option_rule(&mut rule.image_style);
         normalize_option_rule(&mut rule.image_decode);
         normalize_option_rule(&mut rule.pay_action);
-        rule.title = None;
     }
 }
 
 fn normalize_option_rule(value: &mut Option<String>) {
     if let Some(text) = value.as_mut() {
         *text = normalize_rule_expression(text);
+    }
+}
+
+fn normalize_option_selector_rule(value: &mut Option<String>) {
+    normalize_option_rule(value);
+    if let Some(text) = value.as_mut() {
+        *text = super::rule_syntax::normalize_css_rule_for_reader(text);
     }
 }
 
@@ -273,6 +281,10 @@ fn normalize_rule_expression(value: &str) -> String {
 }
 
 fn has_multiple_extractor_segments(value: &str) -> bool {
+    let value = value
+        .strip_prefix("@css:")
+        .or_else(|| value.strip_prefix("@CSS:"))
+        .unwrap_or(value);
     let mut in_brackets = 0i32;
     let mut extractors = 0usize;
     for ch in value.chars() {

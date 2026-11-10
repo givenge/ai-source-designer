@@ -1,5 +1,5 @@
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -174,16 +174,23 @@ pub fn inspect_search_page(
 }
 
 fn run_worker(state: &AppState, task_id: &str, payload: &[u8]) -> Result<String> {
-    let mut child = Command::new("node")
-        .arg(&state.paths.worker_script)
+    if !state.paths.worker_script.is_file() {
+        return Err(anyhow!(
+            "worker script not found: {}",
+            state.paths.worker_script.display()
+        ));
+    }
+    let mut command = crate::worker_runtime::worker_command(&state.paths)?;
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| {
-            format!(
-                "failed to start worker with script {}",
-                state.paths.worker_script.display()
+        .map_err(|error| {
+            anyhow!(
+                "failed to start worker using {} with script {}: {error}",
+                command.get_program().to_string_lossy(),
+                state.paths.worker_script.display(),
             )
         })?;
 

@@ -4,6 +4,8 @@
 
 当前状态：项目已进入可运行桌面应用阶段，本文件作为架构与实施路线的源文档使用。
 
+2026-11-10 运行时决策更新：用户要求改回系统 Playwright。当前实现随附 Worker 脚本，使用系统 Node.js、已修复的用户目录 Playwright 或本机依赖，并在设置页提供检测、一键修复及安装日志。修复先安装到暂存目录，通过 Chromium 启动验证后启用，失败保留原运行环境。本文件后续“内置 Node.js/Playwright/Chromium”分发方案属于早期规划，当前以此决策及 AGENTS.md 为准。
+
 ## 项目定位
 
 ### 目标
@@ -113,9 +115,9 @@
   "searchUrl": "https://example.com/search?q=${key}&page=${page}",
   "ruleSearch": {
     "bookList": ".book-item",
-    "name": "h3 a@text",
+    "name": "@css::is(h3 a)@text",
     "author": ".author@text",
-    "bookUrl": "h3 a@attr[href]"
+    "bookUrl": "@css::is(h3 a)@href"
   },
   "ruleBookInfo": {
     "name": "h1@text",
@@ -143,7 +145,8 @@
 | 层级 | 必要字段 | 说明 |
 |------|----------|------|
 | `BookSource` | `bookSourceName` `bookSourceUrl` | 书源标识 |
-| `BookSource` | `searchUrl` 或 `exploreUrl` | 至少支持一种入口，第一版优先做 `searchUrl` |
+| `BookSource` | `searchUrl` 或 `exploreUrl` | 搜索或书海至少一条入口经过实际验证 |
+| `ruleExplore` | `bookList` `name` `bookUrl` | 书海列表及分页验证 |
 | `ruleSearch` | `bookList` `name` `bookUrl` | 搜索最小闭环 |
 | `ruleBookInfo` | `name` `author` `intro` `tocUrl` | 书籍详情最小闭环 |
 | `ruleToc` | `chapterList` `chapterName` `chapterUrl` | 目录最小闭环 |
@@ -152,7 +155,9 @@
 补充说明：
 
 - `ruleContent` 当前以后端实现为准，核心字段是 `content`、`nextContentUrl`、`replaceRegex`
-- 第一版不要求覆盖 `exploreUrl`、登录流程和复杂请求头拼装
+- 书海从实际导航和下一页链接推断分类与分页 URL，支持路径、查询参数及首页特殊地址；采样下一页并验证新的书籍链接，固定入口或重复首页不能判为分页可用
+- 未采样的书海不计入有效入口；书海验证失败但搜索可用时，修复后仍失败则关闭书海，并在日志中说明保留的能力
+- 第一版不要求覆盖登录流程和复杂请求头拼装
 - 能用 CSS、JSONPath、XPath、Regex 解决的问题，不应默认生成 JavaScript 规则
 
 ## 支持站点范围
@@ -410,8 +415,9 @@ tasks/<task_id>/
 
 必须注意以下兼容性陷阱：
 
-- `ruleContent.title` 在 `../reader-rust/src/model/rule.rs` 中并不存在，首版不得生成
-- `ruleToc.updateTime` 在 `../reader-rust/src/model/rule.rs` 中并不存在，首版不得生成
+- `ruleContent.title` 与 `ruleToc.updateTime` 已存在于 Reader-Rust 当前模型中，可按页面证据生成可选字符串规则
+- `bookUrlPattern` 是详情 URL 的正则表达式，不能填入含占位符的 URL 模板；列表字段必须在单个列表项的作用域内验证
+- 以标签开头的 CSS 后代选择器会统一导出为 `@css::is(...)`，避免 Reader-Rust 将其解释为旧版多 class 语法
 - 任何新字段都必须先在 `../reader-rust/src/model/book_source.rs` 与 `../reader-rust/src/model/rule.rs` 中确认后再加入导出对象
 
 第一版默认不覆盖以下能力：

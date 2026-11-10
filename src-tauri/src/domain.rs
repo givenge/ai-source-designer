@@ -43,6 +43,32 @@ impl Default for AiSettings {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConnectionTestResult {
+    pub model: String,
+    pub latency_ms: u128,
+    pub mock: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDiagnostics {
+    pub version: String,
+    pub data_dir: String,
+    pub db_path: String,
+    pub settings_path: String,
+    pub worker_script: String,
+    pub worker_ready: bool,
+    pub database_ready: bool,
+    pub node_version: Option<String>,
+    pub node_path: Option<String>,
+    pub playwright_path: Option<String>,
+    pub playwright_version: Option<String>,
+    pub browser_version: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskDraft {
     pub target_url: String,
     pub test_keyword: Option<String>,

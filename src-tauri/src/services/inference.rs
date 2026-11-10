@@ -60,6 +60,7 @@ fn infer_explore_rule_from_sampled(
                 ".novellist .item",
                 ".book-list li",
                 ".bookbox",
+                ".item",
             ],
         ),
         name: first_matching_element_rule(
@@ -125,11 +126,29 @@ fn infer_explore_url_from_sampled(
     let anchor_selector = Selector::parse("a[href]").map_err(|_| anyhow!("invalid selector"))?;
     let mut entries = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let pagination = explore::next_page_url(&page.url, &document)
+        .and_then(|next| explore::pagination_template(&page.url, &next));
+    let book_items = infer_explore_rule_from_sampled(paths, task_id, sampled)?
+        .and_then(|rule| rule.book_list)
+        .and_then(|rule| selector(&rule).ok())
+        .map(|selector| {
+            document
+                .select(&selector)
+                .map(|item| item.id())
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
     let base_domain = Url::parse(&sampled.base_url)
         .ok()
         .and_then(|base| base.domain().map(str::to_string));
 
     for anchor in document.select(&anchor_selector) {
+        if anchor
+            .ancestors()
+            .any(|node| book_items.contains(&node.id()))
+        {
+            continue;
+        }
         let label = anchor
             .text()
             .map(str::trim)
@@ -159,12 +178,24 @@ fn infer_explore_url_from_sampled(
             || lower_label.contains("科幻")
             || lower_label.contains("言情")
             || lower_label.contains("武侠")
-            || lower_label.contains("游戏");
+            || lower_label.contains("游戏")
+            || lower_label.contains("连载")
+            || lower_label.contains("完结")
+            || lower_label.contains("奇幻")
+            || lower_label.contains("军事")
+            || lower_label.contains("体育")
+            || lower_label.contains("悬疑")
+            || lower_label.contains("轻小")
+            || lower_label.contains("轻小说")
+            || lower_label.contains("穿越");
         if !is_discovery_link {
             continue;
         }
 
         let normalized = normalize_url(&page.url, href)?;
+        if !is_site_url(&page.url, &normalized) {
+            continue;
+        }
         let rendered_url = Url::parse(&normalized)
             .ok()
             .and_then(|url| {
@@ -184,10 +215,13 @@ fn infer_explore_url_from_sampled(
             })
             .unwrap_or(normalized.clone());
 
-        let key = format!("{label}::{rendered_url}");
-        if !seen.insert(key) {
+        if !seen.insert(normalized.clone()) {
             continue;
         }
+        let rendered_url = pagination
+            .as_ref()
+            .and_then(|template| explore::category_template(&page.url, template, &normalized))
+            .unwrap_or(rendered_url);
 
         entries.push(json!({
             "title": label,
@@ -199,11 +233,11 @@ fn infer_explore_url_from_sampled(
         }));
     }
 
-    if entries.len() >= 3 {
+    if !entries.is_empty() {
         return Ok(Some(serde_json::to_string(&entries)?));
     }
 
-    Ok(Some(page.url.clone()))
+    Ok(Some(pagination.unwrap_or_else(|| page.url.clone())))
 }
 
 pub(super) fn infer_search_rule_from_sampled(
@@ -226,6 +260,7 @@ pub(super) fn infer_search_rule_from_sampled(
                 ".search-result li",
                 ".book-list li",
                 ".bookbox",
+                ".item",
             ],
         ),
         name: first_matching_element_rule(
@@ -406,6 +441,7 @@ pub(super) fn infer_toc_rule_from_sampled(
                 ".chapter-list li",
                 ".listmain dd",
                 "#list dd",
+                "#list li",
                 ".booklist li",
             ],
         ),
@@ -579,6 +615,7 @@ fn first_matching_element_rule(document: &Html, rules: &[&str]) -> Option<String
         ".search-result li",
         ".book-list li",
         ".bookbox",
+        ".item",
     ];
 
     for container_rule in containers {
