@@ -22,7 +22,7 @@ jobs:
       matrix:
         include:
           - name: macos
-            os: macos-14
+            os: macos-15
             target: aarch64-apple-darwin
             bundle_dir: src-tauri/target/aarch64-apple-darwin/release/bundle
           - name: windows
@@ -33,6 +33,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
